@@ -1,111 +1,89 @@
-/**
- * The browser/Electron management boundary.  It deliberately accepts a small,
- * sanitized DTO client: it never accepts raw service state, principals, or
- * password/key digests.
- */
+/** Browser/Electron management UI using only the sanitized FACTORY-1030 facade. */
 export const managementSections = ["Authorizations", "Deployments", "Instances", "Users"];
 
 const fixture = {
+  role: "admin", canManage: true,
+  config: { generic: { intervalSeconds: 30, metadata: { region: "local" } } },
   authorizations: [
-    { id: "auth-generic", type: "generic", name: "Telemetry relay", metadata: { region: "local" }, config: { intervalSeconds: 30 } },
-    { id: "auth-butchr", type: "butchr", name: "Butchr control plane", metadata: { workspace: "factory" }, config: { resource: "jira-project:FACTORY" } },
+    { id: "auth-generic", type: "generic", label: "Telemetry relay", deploymentId: "deploy-local", scopes: ["config", "reporting"], revoked: false },
+    { id: "auth-butchr", type: "butchr", label: "Butchr control plane", deploymentId: "deploy-local", scopes: ["config"], revoked: false },
   ],
-  deployments: [{ id: "deploy-local", name: "Local Morbr", connectedClients: 2, agents: 1, activity: "Config synchronized" }],
-  instances: [{ id: "instance-fixture", deploymentId: "deploy-local", status: "connected", event: "resource.changed", receivedAt: "2026-10-24T13:58:00.000Z" }],
-  users: [{ id: "user-admin", username: "admin", role: "admin" }, { id: "user-reader", username: "reader", role: "reader" }],
+  deployments: [{ id: "deploy-local", label: "Local Morbr", connectedClients: 2, agents: 1, activity: "Config synchronized" }],
+  instances: [{ id: "instance-fixture", deploymentId: "deploy-local", status: "connected" }],
+  users: [{ username: "admin", role: "admin" }, { username: "reader", role: "reader" }],
+  activity: [{ id: "activity-fixture", deploymentId: "deploy-local", instanceId: "instance-fixture", type: "resource.changed", recordedAt: "2026-10-24T13:58:00.000Z" }],
+  counts: { connectedClients: 2, agents: 1 },
 };
+const clone = (value) => structuredClone(value);
 
-function clone(value) { return structuredClone(value); }
-
-/** A disposable in-memory client used by the standalone web and Electron UI. */
-export function createFixtureManagementClient(seed = fixture) {
-  const state = clone(seed);
+/** Disposable fake of createManagementClient(service, session), for UI tests only. */
+export function createFixtureManagementClient(seed = {}) {
+  const state = clone({ ...fixture, ...seed });
   const listeners = new Set();
+  const assertManage = () => { if (!state.canManage) throw new Error("FORBIDDEN"); };
   const emit = (event) => listeners.forEach((listener) => listener(clone(event)));
   return {
-    async listAuthorizations() { return clone(state.authorizations); },
-    async updateAuthorization(id, patch) {
-      const record = state.authorizations.find((item) => item.id === id);
-      if (!record) throw new Error("Authorization not found");
-      Object.assign(record, clone(patch)); emit({ type: "authorization.updated", id }); return clone(record);
-    },
-    async listDeployments() { return clone(state.deployments); },
-    async listInstances() { return clone(state.instances); },
-    async listUsers() { return clone(state.users); },
-    async updateUser(id, patch) {
-      const record = state.users.find((item) => item.id === id);
-      if (!record) throw new Error("User not found");
-      Object.assign(record, clone(patch)); emit({ type: "user.updated", id }); return clone(record);
-    },
-    subscribeInstances(listener) { listeners.add(listener); return () => listeners.delete(listener); },
-    emitFixtureEvent(event) { emit(event); },
+    async getSnapshot() { return clone(state); },
+    async setConfig(value) { assertManage(); state.config = clone(value); emit({ id: "config", deploymentId: "deploy-local", instanceId: "instance-fixture", type: "config.updated", recordedAt: new Date().toISOString() }); },
+    async updateAuthorization(id, details) { assertManage(); const record = state.authorizations.find((item) => item.id === id); if (!record) throw new Error("Authorization not found"); Object.assign(record, clone(details)); return clone(record); },
+    async updateUser(username, details) { assertManage(); const record = state.users.find((item) => item.username === username); if (!record) throw new Error("User not found"); Object.assign(record, clone(details)); return clone(record); },
+    subscribeActivity(listener) { listeners.add(listener); return { close: () => listeners.delete(listener) }; },
+    emitFixtureActivity(event) { state.activity.push(clone(event)); emit(event); },
   };
 }
 
-function element(document, tag, text) {
-  const node = document.createElement(tag);
-  if (text !== undefined) node.textContent = text;
-  return node;
+function element(document, tag, text) { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; return node; }
+function field(document, label, value, multiline = false) {
+  const wrap = element(document, "label", `${label}: `); const input = element(document, multiline ? "textarea" : "input"); input.value = value; wrap.append(input); return { wrap, input };
 }
+function readOnlyList(document, records, fields) { const list = element(document, "ul"); records.forEach((record) => list.append(element(document, "li", fields.map((name) => `${name}: ${record[name]}`).join(" · ")))); return list; }
 
-function readOnlyList(document, records, fields) {
-  const list = element(document, "ul");
-  records.forEach((record) => list.append(element(document, "li", fields.map((field) => `${field}: ${record[field]}`).join(" · "))));
-  return list;
-}
-
-/** Mount the central-management experience into a browser or Electron renderer. */
-export function createManagementApp({ document, client, role = "admin" }) {
-  if (!document || !client) throw new TypeError("document and sanitized management client are required");
-  const root = element(document, "main");
-  const nav = element(document, "nav");
-  const panel = element(document, "section");
-  let active = managementSections[0];
-
-  const canEdit = role === "admin";
+/** Mount the UI. Client must be a sanitized management facade, never service internals. */
+export function createManagementApp({ document, client }) {
+  if (!document || !client?.getSnapshot) throw new TypeError("document and sanitized management client are required");
+  const root = element(document, "main"); const nav = element(document, "nav"); const panel = element(document, "section");
+  let active = managementSections[0]; let generation = 0;
   const render = async () => {
-    panel.replaceChildren(element(document, "h2", active));
+    const current = ++generation; panel.replaceChildren(element(document, "h2", active));
+    const snapshot = await client.getSnapshot(); if (current !== generation) return;
+    const canManage = snapshot.canManage === true;
     if (active === "Authorizations") {
-      const records = await client.listAuthorizations();
-      records.forEach((record) => {
-        const article = element(document, "article");
-        article.append(element(document, "h3", `${record.name} (${record.type})`));
-        article.append(element(document, "pre", JSON.stringify({ metadata: record.metadata, config: record.config }, null, 2)));
-        if (canEdit) {
-          const edit = element(document, "button", record.type === "butchr" ? "Edit Butchr authorization" : "Edit JSON configuration");
-          edit.addEventListener("click", async () => {
-            await client.updateAuthorization(record.id, { metadata: { ...record.metadata, edited: true } });
-            await render();
-          });
-          article.append(edit);
+      snapshot.authorizations.forEach((authorization) => {
+        const article = element(document, "article"); article.append(element(document, "h3", `${authorization.label} (${authorization.type})`));
+        article.append(element(document, "p", `Deployment: ${authorization.deploymentId}; scopes: ${authorization.scopes.join(", ")}`));
+        if (canManage && !authorization.revoked) {
+          const edit = element(document, "button", authorization.type === "butchr" ? "Edit Butchr authorization" : "Edit JSON configuration");
+          edit.addEventListener("click", () => editAuthorization(article, authorization, snapshot, client, render, document)); article.append(edit);
         }
         panel.append(article);
       });
-    } else if (active === "Deployments") {
-      panel.append(readOnlyList(document, await client.listDeployments(), ["name", "connectedClients", "agents", "activity"]));
-    } else if (active === "Instances") {
-      panel.append(readOnlyList(document, await client.listInstances(), ["id", "deploymentId", "status", "event"]));
-    } else {
-      const users = await client.listUsers();
-      users.forEach((user) => {
-        const row = element(document, "div", `${user.username}: ${user.role}`);
-        if (canEdit) {
-          const toggle = element(document, "button", "Toggle reader/admin");
-          toggle.addEventListener("click", async () => { await client.updateUser(user.id, { role: user.role === "admin" ? "reader" : "admin" }); await render(); });
-          row.append(" ", toggle);
-        }
-        panel.append(row);
-      });
-    }
+    } else if (active === "Deployments") panel.append(readOnlyList(document, snapshot.deployments, ["label", "connectedClients", "agents", "activity"]));
+    else if (active === "Instances") { panel.append(readOnlyList(document, snapshot.instances, ["id", "deploymentId", "status"])); panel.append(readOnlyList(document, snapshot.activity, ["type", "recordedAt"])); }
+    else snapshot.users.forEach((user) => {
+      const row = element(document, "div", `${user.username}: ${user.role}`);
+      if (canManage) { const toggle = element(document, "button", "Toggle reader/admin"); toggle.addEventListener("click", async () => { await client.updateUser(user.username, { role: user.role === "admin" ? "reader" : "admin" }); await render(); }); row.append(" ", toggle); }
+      panel.append(row);
+    });
   };
-
-  managementSections.forEach((section) => {
-    const button = element(document, "button", section);
-    button.setAttribute("aria-current", String(section === active));
-    button.addEventListener("click", async () => { active = section; [...nav.children].forEach((item) => item.setAttribute("aria-current", String(item.textContent === section))); await render(); });
-    nav.append(button);
-  });
+  managementSections.forEach((section) => { const button = element(document, "button", section); button.setAttribute("aria-current", String(section === active)); button.addEventListener("click", async () => { active = section; [...nav.children].forEach((item) => item.setAttribute("aria-current", String(item.textContent === section))); await render(); }); nav.append(button); });
   root.append(element(document, "h1", "Morbr Management"), nav, panel);
-  client.subscribeInstances?.((event) => { if (active === "Instances" && event.type.startsWith("instance.")) render(); });
+  client.subscribeActivity?.(() => { if (active === "Instances") render(); });
   return { root, render, get activeSection() { return active; } };
+}
+
+function editAuthorization(article, authorization, snapshot, client, render, document) {
+  article.replaceChildren(element(document, "h3", `Edit ${authorization.label}`));
+  const label = field(document, "Label", authorization.label);
+  const body = authorization.type === "butchr"
+    ? field(document, "Scopes (comma-separated)", authorization.scopes.join(", "))
+    : field(document, "JSON config", JSON.stringify(snapshot.config.generic ?? {}, null, 2), true);
+  const error = element(document, "p"); const save = element(document, "button", "Save"); const cancel = element(document, "button", "Cancel");
+  save.addEventListener("click", async () => {
+    try {
+      if (authorization.type === "butchr") await client.updateAuthorization(authorization.id, { label: label.input.value.trim(), scopes: body.input.value.split(",").map((item) => item.trim()).filter(Boolean) });
+      else { const generic = JSON.parse(body.input.value); if (!generic || Array.isArray(generic) || typeof generic !== "object") throw new Error("Configuration must be a JSON object"); await client.updateAuthorization(authorization.id, { label: label.input.value.trim() }); await client.setConfig({ ...snapshot.config, generic }); }
+      await render();
+    } catch (cause) { error.textContent = cause.message; }
+  });
+  cancel.addEventListener("click", render); article.append(label.wrap, body.wrap, error, save, cancel);
 }

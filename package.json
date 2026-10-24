@@ -6,7 +6,7 @@
   "exports": "./src/index.js",
   "scripts": {
     "build": "node --check src/index.js",
-    "test": "node --test"
+    "test": "MORBR_TEST_TMPDIR=.tmp node --test"
   },
   "engines": {
     "node": ">=20"

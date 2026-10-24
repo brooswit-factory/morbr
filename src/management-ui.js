@@ -3,13 +3,13 @@ export const managementSections = ["Authorizations", "Deployments", "Instances",
 
 const fixture = {
   role: "admin", canManage: true,
-  config: { generic: { intervalSeconds: 30, metadata: { region: "local" } } },
+  config: { version: 1, value: { generic: { intervalSeconds: 30, metadata: { region: "local" } }, other: { keep: true } } },
   authorizations: [
     { id: "auth-generic", type: "generic", label: "Telemetry relay", deploymentId: "deploy-local", scopes: ["config", "reporting"], revoked: false },
     { id: "auth-butchr", type: "butchr", label: "Butchr control plane", deploymentId: "deploy-local", scopes: ["config"], revoked: false },
   ],
-  deployments: [{ id: "deploy-local", label: "Local Morbr", connectedClients: 2, agents: 1, activity: "Config synchronized" }],
-  instances: [{ id: "instance-fixture", deploymentId: "deploy-local", status: "connected" }],
+  deployments: [{ deploymentId: "deploy-local", type: "butchr", name: "Local Morbr", createdAt: "2026-10-24T13:00:00.000Z" }],
+  instances: [{ instanceId: "instance-fixture", deploymentId: "deploy-local", createdAt: "2026-10-24T13:58:00.000Z" }],
   users: [{ username: "admin", role: "admin" }, { username: "reader", role: "reader" }],
   activity: [{ id: "activity-fixture", deploymentId: "deploy-local", instanceId: "instance-fixture", type: "resource.changed", recordedAt: "2026-10-24T13:58:00.000Z" }],
   counts: { connectedClients: 2, agents: 1 },
@@ -21,11 +21,14 @@ export function createFixtureManagementClient(seed = {}) {
   const state = clone({ ...fixture, ...seed });
   const listeners = new Set();
   const assertManage = () => { if (!state.canManage) throw new Error("FORBIDDEN"); };
+  const assertScopes = (scopes) => {
+    if (!Array.isArray(scopes) || !scopes.length || scopes.some((scope) => !["config", "reporting"].includes(scope))) throw new Error("Scopes must be a nonempty subset of config, reporting");
+  };
   const emit = (event) => listeners.forEach((listener) => listener(clone(event)));
   return {
     async getSnapshot() { return clone(state); },
-    async setConfig(value) { assertManage(); state.config = clone(value); emit({ id: "config", deploymentId: "deploy-local", instanceId: "instance-fixture", type: "config.updated", recordedAt: new Date().toISOString() }); },
-    async updateAuthorization(id, details) { assertManage(); const record = state.authorizations.find((item) => item.id === id); if (!record) throw new Error("Authorization not found"); Object.assign(record, clone(details)); return clone(record); },
+    async setConfig(value) { assertManage(); state.config = { version: state.config.version + 1, value: clone(value) }; emit({ id: "config", deploymentId: "deploy-local", instanceId: "instance-fixture", type: "config.updated", recordedAt: new Date().toISOString() }); },
+    async updateAuthorization(id, details) { assertManage(); const record = state.authorizations.find((item) => item.id === id); if (!record) throw new Error("Authorization not found"); if (details.scopes !== undefined) assertScopes(details.scopes); Object.assign(record, clone(details)); return clone(record); },
     async updateUser(username, details) { assertManage(); const record = state.users.find((item) => item.username === username); if (!record) throw new Error("User not found"); Object.assign(record, clone(details)); return clone(record); },
     subscribeActivity(listener) { listeners.add(listener); return { close: () => listeners.delete(listener) }; },
     emitFixtureActivity(event) { state.activity.push(clone(event)); emit(event); },
@@ -57,8 +60,8 @@ export function createManagementApp({ document, client }) {
         }
         panel.append(article);
       });
-    } else if (active === "Deployments") panel.append(readOnlyList(document, snapshot.deployments, ["label", "connectedClients", "agents", "activity"]));
-    else if (active === "Instances") { panel.append(readOnlyList(document, snapshot.instances, ["id", "deploymentId", "status"])); panel.append(readOnlyList(document, snapshot.activity, ["type", "recordedAt"])); }
+    } else if (active === "Deployments") { panel.append(readOnlyList(document, snapshot.deployments, ["deploymentId", "type", "name", "createdAt"])); panel.append(element(document, "p", `Connected clients: ${snapshot.counts.connectedClients ?? 0}; agents: ${snapshot.counts.agents ?? 0}`)); }
+    else if (active === "Instances") { panel.append(readOnlyList(document, snapshot.instances, ["instanceId", "deploymentId", "createdAt"])); panel.append(readOnlyList(document, snapshot.activity, ["type", "recordedAt"])); }
     else snapshot.users.forEach((user) => {
       const row = element(document, "div", `${user.username}: ${user.role}`);
       if (canManage) { const toggle = element(document, "button", "Toggle reader/admin"); toggle.addEventListener("click", async () => { await client.updateUser(user.username, { role: user.role === "admin" ? "reader" : "admin" }); await render(); }); row.append(" ", toggle); }
@@ -76,12 +79,12 @@ function editAuthorization(article, authorization, snapshot, client, render, doc
   const label = field(document, "Label", authorization.label);
   const body = authorization.type === "butchr"
     ? field(document, "Scopes (comma-separated)", authorization.scopes.join(", "))
-    : field(document, "JSON config", JSON.stringify(snapshot.config.generic ?? {}, null, 2), true);
+    : field(document, "JSON config", JSON.stringify(snapshot.config.value?.generic ?? {}, null, 2), true);
   const error = element(document, "p"); const save = element(document, "button", "Save"); const cancel = element(document, "button", "Cancel");
   save.addEventListener("click", async () => {
     try {
-      if (authorization.type === "butchr") await client.updateAuthorization(authorization.id, { label: label.input.value.trim(), scopes: body.input.value.split(",").map((item) => item.trim()).filter(Boolean) });
-      else { const generic = JSON.parse(body.input.value); if (!generic || Array.isArray(generic) || typeof generic !== "object") throw new Error("Configuration must be a JSON object"); await client.updateAuthorization(authorization.id, { label: label.input.value.trim() }); await client.setConfig({ ...snapshot.config, generic }); }
+      if (authorization.type === "butchr") { const scopes = body.input.value.split(",").map((item) => item.trim()).filter(Boolean); if (!scopes.length || scopes.some((scope) => !["config", "reporting"].includes(scope))) throw new Error("Scopes must be a nonempty subset of config, reporting"); await client.updateAuthorization(authorization.id, { label: label.input.value.trim(), scopes }); }
+      else { const generic = JSON.parse(body.input.value); if (!generic || Array.isArray(generic) || typeof generic !== "object") throw new Error("Configuration must be a JSON object"); await client.updateAuthorization(authorization.id, { label: label.input.value.trim() }); await client.setConfig({ ...snapshot.config.value, generic }); }
       await render();
     } catch (cause) { error.textContent = cause.message; }
   });

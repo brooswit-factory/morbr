@@ -124,6 +124,47 @@ export function createMorbrHttpServer({ service, webhookBindings = {} }) {
         return;
       }
 
+      if (request.method === "GET" && url.pathname === "/events/resource") {
+        const token = bearerToken(request);
+        if (!token) return send(response, 401, { code: "UNAUTHORIZED" });
+        const requestedIdentity = identity(url.searchParams);
+        const instanceId = url.searchParams.get("instanceId");
+        const provider = url.searchParams.get("provider");
+        const resource = url.searchParams.get("resource");
+        const subjectKey = url.searchParams.get("subject");
+        const subscriptionId = url.searchParams.get("subscriptionId");
+        const streamEpoch = Number(url.searchParams.get("streamEpoch") ?? "1");
+        if (!instanceId || !provider || resource === null || !subjectKey || !subscriptionId || !Number.isSafeInteger(streamEpoch) || streamEpoch < 1) {
+          return send(response, 400, { code: "INVALID_RESOURCE_SUBSCRIPTION" });
+        }
+        // Validate the scoped reporting key before committing the stream.
+        service.keyFor(token, "reporting", service.deploymentFor(requestedIdentity));
+        const stream = { response, subscription: null, subscriptionId, streamEpoch, sequence: 0 };
+        response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+        stream.subscription = service.subscribeMorbinResource({
+          reportingToken: token,
+          identity: requestedIdentity,
+          instanceId,
+          provider,
+          resource,
+          listener: (upstream) => {
+            const envelope = {
+              ...upstream,
+              subscriptionId: stream.subscriptionId,
+              streamEpoch: stream.streamEpoch,
+              sequence: ++stream.sequence,
+              subject: { kind: "resource", key: subjectKey },
+              meta: { ...upstream.meta, source: "morbr", upstreamFreshness: service.upstreamFreshnessBounds() },
+            };
+            event(response, "resource", envelope);
+            if (upstream.kind === "error" && upstream.error?.retryable === false) closeStream(stream);
+          },
+        });
+        streams.add(stream);
+        request.once("close", () => closeStream(stream));
+        return;
+      }
+
       if (request.method === "GET" && url.pathname === "/events/activity") {
         const credentials = basicCredentials(request);
         if (!credentials) return send(response, 401, { code: "UNAUTHORIZED" });

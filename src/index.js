@@ -338,6 +338,15 @@ export class MorbrService {
    */
   subscribeMorbinEvents(actor, { reportingToken, identity, instanceId, provider, resource, listener = () => {} }) {
     this.requireAdmin(actor);
+    return this.subscribeMorbinResource({ reportingToken, identity, instanceId, provider, resource, listener });
+  }
+
+  /**
+   * Resource transport boundary for connected consumers. The caller supplies
+   * the explicit provider/resource mapping; Morbr never derives it from an
+   * opaque downstream subject or forwards its reporting token to a provider.
+   */
+  subscribeMorbinResource({ reportingToken, identity, instanceId, provider, resource, listener = () => {} }) {
     if (!this.morbin?.watchResource) fail("MORBIN_NOT_CONFIGURED");
     const deployment = this.deploymentFor(identity);
     const instance = this.state.instances[instanceId];

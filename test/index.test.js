@@ -287,6 +287,48 @@ test("management client exposes sanitized DTOs and keeps mutations server-author
   activity.close();
 });
 
+test("resource SSE preserves an opaque subject while the client supplies provider/resource mapping", async () => {
+  const root = process.env.MORBR_TEST_TMPDIR ?? tmpdir();
+  const path = join(await mkdtemp(join(root, "morbr-resource-http-")), "state.json");
+  const morbin = createMorbin({ providers: { fake: { fetch: async () => ({ id: "resource-1", revision: 1 }) } } });
+  const service = await createMorbr({
+    statePath: path,
+    morbin,
+    upstreamFreshness: { minimumMs: 4_000, maximumMs: 6_000 },
+  });
+  await service.createUser({ username: "admin", password: "fixture-password", role: "admin" });
+  const admin = service.authenticate({ username: "admin", password: "fixture-password" });
+  await service.registerDeployment(generic);
+  const key = await service.issueKey(admin, { scopes: ["reporting"], ...generic });
+  const instance = await service.startInstance(generic);
+  const http = createMorbrHttpServer({ service });
+  const address = await http.start();
+  try {
+    const url = new URL(`http://127.0.0.1:${address.port}/events/resource`);
+    url.search = new URLSearchParams({
+      ...generic,
+      instanceId: instance.id,
+      provider: "fake",
+      resource: "resource-1",
+      subject: "central-resource/opaque:42",
+      subscriptionId: "consumer-subscription",
+      streamEpoch: "3",
+    });
+    const response = await fetch(url, { headers: { authorization: `Bearer ${key.token}` } });
+    assert.equal(response.status, 200);
+    const reader = response.body.getReader();
+    const frame = new TextDecoder().decode((await reader.read()).value);
+    const envelope = JSON.parse(frame.match(/data: (.+)/)[1]);
+    assert.equal(envelope.kind, "snapshot");
+    assert.deepEqual(envelope.subject, { kind: "resource", key: "central-resource/opaque:42" });
+    assert.deepEqual(envelope.meta.upstreamFreshness, { minimumMs: 4_000, maximumMs: 6_000, demandPollIntervalMs: 6_001 });
+    assert.deepEqual(envelope.data, { id: "resource-1", revision: 1 });
+    await reader.cancel();
+  } finally {
+    await http.close();
+  }
+});
+
 test("HTTP/SSE/webhook transport authorizes requests and records signed fixture webhooks", async () => {
   const root = process.env.MORBR_TEST_TMPDIR ?? tmpdir();
   await mkdir(root, { recursive: true });

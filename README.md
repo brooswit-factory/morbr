@@ -52,9 +52,13 @@ The exported service implements persisted local state, config subscriptions,
 Morbin resource-stream consumption, and `ingestMorbinEvent` for authorized
 upstream/client event chaining. `createMorbrHttpServer` supplies a runnable
 HTTP boundary: Basic-authenticated `/management` and `/config`, bearer-key
-SSE `/events/config`, Basic-authenticated `/events/activity`, and signed
-`/webhooks/:name` ingestion. `start({host, port})` and `close()` make startup
-and shutdown explicit for local or remote hosting.
+SSE `/events/config`, bearer reporting-key SSE `/events/resource`,
+Basic-authenticated `/events/activity`, and signed `/webhooks/:name` ingestion.
+`/events/resource` takes explicit `provider` and `resource` values plus an
+opaque `subject`; it preserves that subject and publishes the configured
+upstream freshness bounds, without parsing it or distributing credentials to a
+consumer. `start({host, port})` and `close()` make startup and shutdown
+explicit for local or remote hosting.
 
 Webhook bindings are startup-only injected fixtures containing a secret,
 scoped reporting token, identity, and optional instance ID. Fixture signatures

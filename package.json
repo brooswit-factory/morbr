@@ -6,7 +6,7 @@
   "exports": "./src/index.js",
   "scripts": {
     "build": "node --check src/index.js && node --check src/server.js && node --check src/management-ui.js && node --check src/management-http.js && node --check src/web-server.mjs && node --check src/electron-main.js",
-    "test": "MORBR_TEST_TMPDIR=.tmp node --test",
+    "test": "cross-env MORBR_TEST_TMPDIR=.tmp node --test",
     "start:web": "node src/web-server.mjs",
     "start:electron": "electron src/electron-main.js"
   },
@@ -18,6 +18,7 @@
     "@brooswit-factory/morbin": "github:brooswit-factory/morbin#39e47eb8089e6ef17426e8607beec21759b30c40"
   },
   "devDependencies": {
+    "cross-env": "^7.0.3",
     "electron": "^43.8.3"
   }
 }

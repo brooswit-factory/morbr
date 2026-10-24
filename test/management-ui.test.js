@@ -54,3 +54,12 @@ test("obsolete async snapshots cannot overwrite newer navigation", async () => {
   assert.equal(app.activeSection, "Users");
   assert.equal(Boolean(find(app.root.children[2], (node) => node.tag === "article")), false);
 });
+
+test("UI distinguishes missing client and agent measurements from zero", async () => {
+  const unknown = createManagementApp({ document, client: createFixtureManagementClient({ counts: {} }) });
+  await unknown.render(); await unknown.root.children[1].children[1].click();
+  assert.match(find(unknown.root.children[2], (node) => node.tag === "p").text, /Connected clients: not measured; agents: not measured/);
+  const zero = createManagementApp({ document, client: createFixtureManagementClient({ counts: { connectedClients: 0, agents: 0 } }) });
+  await zero.render(); await zero.root.children[1].children[1].click();
+  assert.match(find(zero.root.children[2], (node) => node.tag === "p").text, /Connected clients: 0; agents: 0/);
+});

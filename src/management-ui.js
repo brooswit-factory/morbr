@@ -40,6 +40,7 @@ function field(document, label, value, multiline = false) {
   const wrap = element(document, "label", `${label}: `); const input = element(document, multiline ? "textarea" : "input"); input.value = value; wrap.append(input); return { wrap, input };
 }
 function readOnlyList(document, records, fields) { const list = element(document, "ul"); records.forEach((record) => list.append(element(document, "li", fields.map((name) => `${name}: ${record[name]}`).join(" · ")))); return list; }
+function measuredCount(value) { return Number.isFinite(value) && value >= 0 ? value : "not measured"; }
 
 /** Mount the UI. Client must be a sanitized management facade, never service internals. */
 export function createManagementApp({ document, client }) {
@@ -60,7 +61,7 @@ export function createManagementApp({ document, client }) {
         }
         panel.append(article);
       });
-    } else if (active === "Deployments") { panel.append(readOnlyList(document, snapshot.deployments, ["deploymentId", "type", "name", "createdAt"])); panel.append(element(document, "p", `Connected clients: ${snapshot.counts.connectedClients ?? 0}; agents: ${snapshot.counts.agents ?? 0}`)); }
+    } else if (active === "Deployments") { panel.append(readOnlyList(document, snapshot.deployments, ["deploymentId", "type", "name", "createdAt"])); panel.append(element(document, "p", `Connected clients: ${measuredCount(snapshot.counts?.connectedClients)}; agents: ${measuredCount(snapshot.counts?.agents)}`)); }
     else if (active === "Instances") { panel.append(readOnlyList(document, snapshot.instances, ["id", "deploymentId", "startedAt"])); panel.append(readOnlyList(document, snapshot.activity, ["type", "recordedAt"])); }
     else snapshot.users.forEach((user) => {
       const row = element(document, "div", `${user.username}: ${user.role}`);

@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Morbr Management</title></head>
+<body><div id="app"></div><script type="module">
+  import { createFixtureManagementClient, createManagementApp } from "./management-ui.js";
+  const management = createManagementApp({ document, client: createFixtureManagementClient() });
+  document.querySelector("#app").append(management.root);
+  management.render();
+</script></body></html>

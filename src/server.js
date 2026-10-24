@@ -55,7 +55,7 @@ export function createMorbrHttpServer({ service, webhookBindings = {} }) {
     if (!streams.delete(stream)) return;
     stream.subscription?.close();
     if (!stream.response.writableEnded) {
-      if (error) event(stream.response, "error", { code: error.code ?? "UNAUTHORIZED", retryable: false });
+      if (error) event(stream.response, "error", { code: error.code ?? "UNAUTHORIZED", message: error.message ?? error.code ?? "UNAUTHORIZED", retryable: false });
       stream.response.end();
     }
   }
@@ -104,14 +104,20 @@ export function createMorbrHttpServer({ service, webhookBindings = {} }) {
         const token = bearerToken(request);
         if (!token) return send(response, 401, { code: "UNAUTHORIZED" });
         const requestedIdentity = identity(url.searchParams);
+        const subscriptionId = url.searchParams.get("subscriptionId");
+        const streamEpoch = Number(url.searchParams.get("streamEpoch") ?? "1");
+        if (!subscriptionId || !Number.isSafeInteger(streamEpoch) || streamEpoch < 1) {
+          return send(response, 400, { code: "INVALID_SUBSCRIPTION" });
+        }
         // Authorize before committing the SSE response headers so denials stay
         // ordinary HTTP errors rather than a half-open event stream.
         service.getConfig(token, requestedIdentity);
-        const stream = { response, subscription: null, sequence: 0 };
+        const stream = { response, subscription: null, subscriptionId, streamEpoch, sequence: 0 };
         response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
         stream.subscription = service.subscribeConfig(token, requestedIdentity, (config) => {
           const kind = stream.sequence === 0 ? "snapshot" : "change";
-          event(response, "config", { contractVersion: "1.0", kind, sequence: ++stream.sequence, subject: { kind: "config", key: `${requestedIdentity.type}:${requestedIdentity.deploymentId}` }, data: config.value, meta: { emittedAt: new Date().toISOString(), source: "morbr" } });
+          const operation = kind === "change" ? "upsert" : undefined;
+          event(response, "config", { contractVersion: "1.0", kind, subscriptionId: stream.subscriptionId, streamEpoch: stream.streamEpoch, sequence: ++stream.sequence, cursor: `config-${config.version}`, subject: { kind: "config", key: `${requestedIdentity.type}:${requestedIdentity.deploymentId}` }, data: { version: config.version, value: config.value, ...(operation ? { operation } : {}) }, ...(operation ? { operation } : {}), meta: { emittedAt: new Date().toISOString(), source: "morbr" } });
         }, (error) => closeStream(stream, error));
         streams.add(stream);
         request.once("close", () => closeStream(stream));

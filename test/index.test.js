@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { createHmac } from "node:crypto";
 import { connect } from "node:net";
 import { createMorbin } from "@brooswit-factory/morbin";
+import { createButchrd } from "@brooswit-factory/butchrd";
 import { createManagementClient, createMorbr, createMorbrHttpServer, MorbrError } from "../src/index.js";
 
 const generic = { deploymentId: "deploy-generic", type: "generic" };
@@ -254,18 +255,24 @@ test("HTTP/SSE/webhook transport authorizes requests and records signed fixture 
     assert.equal(JSON.stringify(await management.json()).includes("passwordDigest"), false);
     const forbiddenResponse = await fetch(`${base}/config`, { method: "PATCH", headers: { authorization: basic("reader"), "content-type": "application/json" }, body: JSON.stringify({ mode: "reader" }) });
     assert.equal(forbiddenResponse.status, 403);
-    const wrongScope = await fetch(`${base}/events/config?deploymentId=${butchr.deploymentId}&type=${butchr.type}`, { headers: { authorization: `Bearer ${key.token}` } });
+    const wrongScope = await fetch(`${base}/events/config?deploymentId=${butchr.deploymentId}&type=${butchr.type}&subscriptionId=wrong&streamEpoch=1`, { headers: { authorization: `Bearer ${key.token}` } });
     assert.equal(wrongScope.status, 403);
 
-    const stream = await fetch(`${base}/events/config?deploymentId=${generic.deploymentId}&type=${generic.type}`, { headers: { authorization: `Bearer ${key.token}` } });
+    const daemon = createButchrd();
+    const configSubscription = daemon.openSubscription({ subject: { kind: "config", key: "generic:deploy-generic" }, watchMode: "resource" });
+    const stream = await fetch(`${base}/events/config?deploymentId=${generic.deploymentId}&type=${generic.type}&subscriptionId=${configSubscription.id}&streamEpoch=1`, { headers: { authorization: `Bearer ${key.token}` } });
     assert.equal(stream.status, 200);
     const streamReader = stream.body.getReader();
     const first = new TextDecoder().decode((await streamReader.read()).value);
     assert.match(first, /event: config/);
+    const firstEnvelope = JSON.parse(first.match(/data: (.+)/)[1]);
+    assert.equal(daemon.receive(firstEnvelope).accepted, true);
     const updated = await fetch(`${base}/config`, { method: "PATCH", headers: { authorization: basic("admin"), "content-type": "application/json" }, body: JSON.stringify({ mode: "admin" }) });
     assert.equal(updated.status, 200);
     const second = new TextDecoder().decode((await streamReader.read()).value);
     assert.match(second, /"mode":"admin"/);
+    const secondEnvelope = JSON.parse(second.match(/data: (.+)/)[1]);
+    assert.equal(daemon.receive(secondEnvelope).accepted, true);
 
     const webhook = { provider: "fake", resource: "resource-1", value: { id: "resource-1", revision: 2 }, cursor: "c2" };
     const body = JSON.stringify(webhook);
@@ -281,7 +288,7 @@ test("HTTP/SSE/webhook transport authorizes requests and records signed fixture 
     assert.match(revokedEvent, /event: error/);
     assert.match(revokedEvent, /"code":"UNAUTHORIZED"/);
     assert.equal((await streamReader.read()).done, true);
-    const revoked = await fetch(`${base}/events/config?deploymentId=${generic.deploymentId}&type=${generic.type}`, { headers: { authorization: `Bearer ${key.token}` } });
+    const revoked = await fetch(`${base}/events/config?deploymentId=${generic.deploymentId}&type=${generic.type}&subscriptionId=revoked&streamEpoch=1`, { headers: { authorization: `Bearer ${key.token}` } });
     assert.equal(revoked.status, 401);
   } finally {
     await http.close();
@@ -306,7 +313,7 @@ test("transport contains malformed targets and shutdown terminates an open SSE s
     assert.match(malformed, /400/);
     const valid = await fetch(`${base}/management`, { headers: { authorization: `Basic ${Buffer.from("admin:fixture-password").toString("base64")}` } });
     assert.equal(valid.status, 200);
-    const stream = await fetch(`${base}/events/config?deploymentId=${generic.deploymentId}&type=${generic.type}`, { headers: { authorization: `Bearer ${key.token}` } });
+    const stream = await fetch(`${base}/events/config?deploymentId=${generic.deploymentId}&type=${generic.type}&subscriptionId=shutdown&streamEpoch=1`, { headers: { authorization: `Bearer ${key.token}` } });
     const reader = stream.body.getReader();
     await reader.read();
     await http.close();

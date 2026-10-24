@@ -11,13 +11,13 @@
     "start:electron": "electron src/electron-main.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.12.0"
   },
   "dependencies": {
     "@brooswit-factory/butchrd": "github:brooswit-factory/butchrd#938e1411d053309c6beb11a9f84d8af4063b6d0e",
     "@brooswit-factory/morbin": "github:brooswit-factory/morbin#39e47eb8089e6ef17426e8607beec21759b30c40"
   },
   "devDependencies": {
-    "electron": "^32.3.3"
+    "electron": "^43.8.3"
   }
 }

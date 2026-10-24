@@ -13,6 +13,7 @@ test("same-origin web bridge keeps credentials server-side and forwards manageme
   const service = await createMorbr({ statePath: join(await mkdtemp(join(root, "morbr-web-")), "state.json") });
   await service.createUser({ username: "admin", password: "päss漢word", role: "admin" });
   const admin = service.authenticate({ username: "admin", password: "päss漢word" });
+  await service.createUser(admin, { username: "alice.smith", password: "reader-password", role: "reader" });
   const identity = { deploymentId: "browser-bridge", type: "generic" };
   await service.registerDeployment(identity);
   const instance = await service.startInstance(identity);
@@ -29,6 +30,9 @@ test("same-origin web bridge keeps credentials server-side and forwards manageme
     const updated = await fetch(`${baseUrl}/api/config`, { method: "PATCH", headers: { origin: baseUrl, "content-type": "application/json" }, body: JSON.stringify({ bridge: true }) });
     assert.equal(updated.status, 200);
     assert.deepEqual((await client.getSnapshot()).config.value, { bridge: true });
+    const dottedUser = await fetch(`${baseUrl}/api/management/users/alice.smith`, { method: "PATCH", headers: { origin: baseUrl, "content-type": "application/json" }, body: JSON.stringify({ role: "admin" }) });
+    assert.equal(dottedUser.status, 200);
+    assert.deepEqual(await dottedUser.json(), { username: "alice.smith", role: "admin" });
     const received = [];
     const subscription = client.subscribeActivity((event) => received.push(event));
     await new Promise((resolve) => setTimeout(resolve, 20));

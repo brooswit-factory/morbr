@@ -11,7 +11,8 @@ const managementRoute = (method, route) =>
   (method === "GET" && ["/management", "/events/activity"].includes(route)) ||
   (method === "PATCH" && route === "/config") ||
   (method === "POST" && ["/management/users", "/management/authorizations"].includes(route)) ||
-  (["PATCH", "DELETE"].includes(method) && /^\/management\/(users|authorizations)\/[A-Za-z0-9_-]+$/.test(route));
+  (method === "PATCH" && /^\/management\/users\/[A-Za-z0-9._-]+$/.test(route)) ||
+  (["PATCH", "DELETE"].includes(method) && /^\/management\/authorizations\/[A-Za-z0-9_-]+$/.test(route));
 const writesJson = (method) => !["GET", "HEAD", "DELETE"].includes(method);
 const jsonContentType = (value) => value?.split(";", 1)[0].trim().toLowerCase() === "application/json";
 

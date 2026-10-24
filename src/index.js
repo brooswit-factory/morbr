@@ -1,8 +1,19 @@
 import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
+import { assertFreshnessSeparation } from "@brooswit-factory/morbin";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 const STATE_VERSION = 1;
+const DEFAULT_UPSTREAM_FRESHNESS = Object.freeze({ minimumMs: 4_000, maximumMs: 6_000 });
+
+function freshnessBounds(value = DEFAULT_UPSTREAM_FRESHNESS) {
+  const minimumMs = value?.minimumMs;
+  const maximumMs = value?.maximumMs;
+  if (!Number.isFinite(minimumMs) || !Number.isFinite(maximumMs) || minimumMs < 0 || maximumMs < minimumMs) {
+    fail("INVALID_FRESHNESS_BOUNDS");
+  }
+  return Object.freeze({ minimumMs, maximumMs });
+}
 
 export class MorbrError extends Error {
   constructor(code, message = code) {
@@ -111,12 +122,13 @@ export class JsonStateStore {
  * launch jobs or execute client-provided events.
  */
 export class MorbrService {
-  static async open({ statePath, morbin = null }) {
+  static async open(options) {
+    const { statePath, morbin = null, upstreamFreshness, demandPollIntervalMs, connectedPollMinimumMs } = options;
     const store = new JsonStateStore(statePath);
-    return new MorbrService(store, await store.load(), morbin);
+    return new MorbrService(store, await store.load(), morbin, { upstreamFreshness, demandPollIntervalMs, connectedPollMinimumMs });
   }
 
-  constructor(store, state, morbin = null) {
+  constructor(store, state, morbin = null, { upstreamFreshness, demandPollIntervalMs, connectedPollMinimumMs } = {}) {
     this.store = store;
     this.state = state;
     this.sessions = new Map();
@@ -124,6 +136,14 @@ export class MorbrService {
     this.configSubscriptions = new Set();
     this.configDelivery = Promise.resolve();
     this.activitySubscriptions = new Set();
+    this.upstreamFreshness = freshnessBounds(upstreamFreshness);
+    this.demandPollIntervalMs = demandPollIntervalMs ?? this.upstreamFreshness.maximumMs + 1;
+    if (!Number.isFinite(this.demandPollIntervalMs) || this.demandPollIntervalMs <= 0) fail("INVALID_DEMAND_POLL_INTERVAL");
+    if (connectedPollMinimumMs !== undefined) {
+      assertFreshnessSeparation({ morbrMaximum: this.upstreamFreshness.maximumMs, butchrdMinimum: connectedPollMinimumMs });
+    }
+    this.morbinSubscriptions = new Map();
+    this.demandPollTimer = null;
   }
 
   async persist() {
@@ -338,8 +358,49 @@ export class MorbrService {
         if (error instanceof MorbrError && ["UNAUTHORIZED", "FORBIDDEN"].includes(error.code)) close();
       }
     });
-    close = () => subscription.close();
-    return { id: subscription.id, close };
+    const managed = {
+      id: subscription.id,
+      provider: String(provider),
+      resource: isolatedJson(resource).value,
+      close: () => {
+        if (!this.morbinSubscriptions.delete(subscription.id)) return;
+        subscription.close();
+        this.stopDemandPollingIfIdle();
+      },
+    };
+    close = managed.close;
+    this.morbinSubscriptions.set(subscription.id, managed);
+    this.startDemandPolling();
+    return { id: managed.id, close: managed.close };
+  }
+
+  /**
+   * The declared bounds are the actual ranges configured for the injected
+   * upstream. Connected consumers use them to keep their local poll minimum
+   * strictly above Morbr's maximum; resource identity stays provider/resource,
+   * never an opaque subscription subject.
+   */
+  upstreamFreshnessBounds() {
+    return { ...this.upstreamFreshness, demandPollIntervalMs: this.demandPollIntervalMs };
+  }
+
+  startDemandPolling() {
+    if (this.demandPollTimer || this.morbinSubscriptions.size === 0) return;
+    const poll = async () => {
+      try {
+        await this.morbin.poll();
+      } catch {
+        // Morbin owns source failures and sends them through each active watch.
+      }
+    };
+    this.demandPollTimer = setInterval(() => { void poll(); }, this.demandPollIntervalMs);
+    this.demandPollTimer.unref?.();
+  }
+
+  stopDemandPollingIfIdle() {
+    if (this.morbinSubscriptions.size !== 0 || !this.demandPollTimer) return;
+    clearInterval(this.demandPollTimer);
+    this.demandPollTimer = null;
   }
 
   async ingestMorbinEvent(token, identity, event) {
@@ -359,6 +420,7 @@ export class MorbrService {
       role: user.role,
       canManage: user.role === "admin",
       config: structuredClone(this.state.config),
+      upstreamFreshness: this.upstreamFreshnessBounds(),
       authorizations: Object.values(this.state.keys).map((key) => this.managementAuthorization(key)),
       deployments: Object.values(this.state.deployments).map(({ deploymentId, type, name, createdAt }) => ({ deploymentId, type, name, createdAt })),
       instances: Object.values(this.state.instances).map(({ id, deploymentId, startedAt }) => ({ id, deploymentId, startedAt })),

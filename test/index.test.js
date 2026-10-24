@@ -144,6 +144,60 @@ test("subscriber joining during writes never receives an older or duplicate conf
   assert.deepEqual(versions, [2]);
 });
 
+test("Morbr publishes actual upstream bounds and polls only while a mapped resource is actively demanded", async () => {
+  let fetches = 0;
+  const morbin = createMorbin({
+    providers: { fake: { fetch: async () => ({ id: "resource-1", revision: ++fetches }) } },
+    freshness: { pull: [0, 0], upstream: [0, 0], push: [0, 0] },
+    random: () => 0,
+  });
+  const root = process.env.MORBR_TEST_TMPDIR ?? tmpdir();
+  const path = join(await mkdtemp(join(root, "morbr-demand-")), "state.json");
+  const service = await createMorbr({
+    statePath: path,
+    morbin,
+    upstreamFreshness: { minimumMs: 0, maximumMs: 0 },
+    demandPollIntervalMs: 5,
+    connectedPollMinimumMs: 1,
+  });
+  await service.createUser({ username: "admin", password: "fixture-password", role: "admin" });
+  const admin = service.authenticate({ username: "admin", password: "fixture-password" });
+  await service.registerDeployment(generic);
+  const key = await service.issueKey(admin, { scopes: ["reporting"], ...generic });
+  const instance = await service.startInstance(generic);
+
+  assert.deepEqual(service.upstreamFreshnessBounds(), { minimumMs: 0, maximumMs: 0, demandPollIntervalMs: 5 });
+  assert.deepEqual(service.managementSnapshot(admin).upstreamFreshness, { minimumMs: 0, maximumMs: 0, demandPollIntervalMs: 5 });
+  assert.equal(fetches, 0, "without a resource subscription Morbr creates no upstream demand");
+
+  const subscription = service.subscribeMorbinEvents(admin, {
+    reportingToken: key.token,
+    identity: generic,
+    instanceId: instance.id,
+    provider: "fake",
+    resource: "resource-1",
+  });
+  await waitFor(() => fetches >= 2);
+  assert.ok(service.listActivity(admin, generic.deploymentId).some((entry) => entry.type === "morbin.change"));
+  subscription.close();
+  const stoppedAt = fetches;
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(fetches, stoppedAt, "closing the last mapped resource subscription stops demand polling");
+});
+
+test("connected poll minimum must exceed Morbr's published upstream maximum", async () => {
+  const root = process.env.MORBR_TEST_TMPDIR ?? tmpdir();
+  const path = join(await mkdtemp(join(root, "morbr-bounds-")), "state.json");
+  await assert.rejects(
+    createMorbr({
+      statePath: path,
+      upstreamFreshness: { minimumMs: 4, maximumMs: 6 },
+      connectedPollMinimumMs: 6,
+    }),
+    (error) => error instanceof RangeError,
+  );
+});
+
 test("Morbin events are consumed through the pinned library and persisted without key propagation", async () => {
   const morbin = createMorbin({ providers: { fake: { fetch: async () => ({ id: "resource-1", revision: 1 }) } } });
   const root = process.env.MORBR_TEST_TMPDIR ?? tmpdir();

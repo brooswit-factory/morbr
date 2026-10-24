@@ -30,6 +30,22 @@ snapshot and each committed, de-duplicated change in version order until their
 scoped key is revoked. Terminal Morbin stream errors are retained as safe plain
 data (`code`, `message`, `retryable: false`) for live consumers and reloads.
 
+## Upstream freshness and active demand
+
+`createMorbr` accepts the actual configured `upstreamFreshness` bounds as
+`{ minimumMs, maximumMs }`; the default is Morbin's upstream `[4000, 6000]`
+range. `upstreamFreshnessBounds()` and the sanitized management snapshot expose
+those bounds plus `demandPollIntervalMs` to connected composition. Supplying
+`connectedPollMinimumMs` validates the contract that the connected consumer's
+minimum is strictly greater than Morbr's upstream maximum.
+
+Morbr owns only the lifecycle around Morbin's existing `watchResource` and
+`poll` APIs. An authorized subscription maps explicitly to its `provider` and
+`resource`, starts active stale-demand polling, and records the resulting
+Morbin envelopes as activity. Closing the final subscription stops that timer.
+Morbr does not parse opaque consumer subjects, build a fallback registry, or
+give a consumer central credentials.
+
 ## Current transport scope
 
 The exported service implements persisted local state, config subscriptions,

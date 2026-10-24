@@ -30,6 +30,20 @@ snapshot and each committed, de-duplicated change in version order until their
 scoped key is revoked. Terminal Morbin stream errors are retained as safe plain
 data (`code`, `message`, `retryable: false`) for live consumers and reloads.
 
+## Management UI boundary
+
+`createManagementClient(service, session)` is the only intended service surface
+for the FACTORY-1031 management UI. `getSnapshot()` returns these sanitized DTOs:
+`authorizations` (id/label/deployment/type/scopes/revoked), `deployments`,
+`instances`, `users` (username/role), activity metadata, counts, and config.
+It never returns raw state, password/key digests, salts, or principal records.
+
+The facade exposes `setConfig`, `createUser`, `updateUser`,
+`issueAuthorization`, `updateAuthorization`, `revokeAuthorization`, and
+`subscribeActivity`. All mutations remain server-role-authorized; a reader can
+read a snapshot but cannot use an admin mutation. Activity subscription events
+contain metadata only, never the stored payload.
+
 ## Build and verify
 
 Requires Node.js 20 or newer.

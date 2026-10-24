@@ -4,7 +4,7 @@ import { mkdir, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createMorbin } from "@brooswit-factory/morbin";
-import { createMorbr, MorbrError } from "../src/index.js";
+import { createManagementClient, createMorbr, MorbrError } from "../src/index.js";
 
 const generic = { deploymentId: "deploy-generic", type: "generic" };
 const butchr = { deploymentId: "deploy-butchr", type: "butchr" };
@@ -171,4 +171,28 @@ test("terminal Morbin errors retain safe plain-data details live and after reloa
   const reloaded = await createMorbr({ statePath: path });
   const reloadedAdmin = reloaded.authenticate({ username: "admin", password: "fixture-password" });
   assert.deepEqual(reloaded.listActivity(reloadedAdmin, generic.deploymentId)[0].payload.error, { code: "UNAUTHORIZED", message: "UNAUTHORIZED", retryable: false });
+});
+
+test("management client exposes sanitized DTOs and keeps mutations server-authorized", async () => {
+  const { service, admin, reader } = await fixture();
+  const adminClient = createManagementClient(service, admin);
+  const readerClient = createManagementClient(service, reader);
+  const key = await adminClient.issueAuthorization({ scopes: ["reporting"], ...generic, label: "dashboard" });
+  const instance = await service.startInstance(generic);
+  const events = [];
+  const activity = adminClient.subscribeActivity((event) => events.push(event));
+  await service.recordActivity(key.token, { ...generic, instanceId: instance.id, type: "started", payload: { internal: "not-for-ui" } });
+
+  const snapshot = adminClient.getSnapshot();
+  assert.equal(snapshot.canManage, true);
+  assert.deepEqual(snapshot.authorizations[0], { id: key.id, label: "dashboard", deploymentId: generic.deploymentId, type: "generic", scopes: ["reporting"], revoked: false });
+  assert.equal(snapshot.users.some((user) => "passwordDigest" in user || "salt" in user), false);
+  assert.equal(snapshot.activity[0].payload, undefined);
+  assert.equal(events[0].payload, undefined);
+  assert.equal(snapshot.counts.instances, 1);
+  await assert.rejects(readerClient.updateUser("admin", { role: "reader" }), forbidden);
+  await adminClient.updateAuthorization(key.id, { label: "renamed", scopes: ["config", "reporting"] });
+  await adminClient.updateUser("reader", { role: "admin" });
+  assert.equal(adminClient.getSnapshot().users.find((user) => user.username === "reader").role, "admin");
+  activity.close();
 });

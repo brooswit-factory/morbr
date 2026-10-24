@@ -125,6 +125,7 @@ export class MorbrService {
     this.morbin = morbin;
     this.configSubscriptions = new Set();
     this.configDelivery = Promise.resolve();
+    this.activitySubscriptions = new Set();
   }
 
   async persist() {
@@ -188,6 +189,36 @@ export class MorbrService {
     if (!key) fail("KEY_NOT_FOUND");
     key.revoked = true;
     await this.persist();
+  }
+
+  async updateAuthorization(actor, id, { label, scopes } = {}) {
+    this.requireAdmin(actor);
+    const key = this.state.keys[id];
+    if (!key) fail("KEY_NOT_FOUND");
+    if (label !== undefined) key.label = String(label);
+    if (scopes !== undefined) {
+      if (!Array.isArray(scopes) || scopes.length === 0 || scopes.some((scope) => !["config", "reporting"].includes(scope))) fail("INVALID_SCOPES");
+      key.scopes = [...new Set(scopes)].sort();
+    }
+    await this.persist();
+    return this.managementAuthorization(key);
+  }
+
+  async updateUser(actor, username, { role, password } = {}) {
+    this.requireAdmin(actor);
+    const user = this.state.users[username];
+    if (!user) fail("USER_NOT_FOUND");
+    if (role !== undefined) {
+      if (role !== "admin" && role !== "reader") fail("INVALID_ROLE");
+      user.role = role;
+    }
+    if (password !== undefined) {
+      const credentials = passwordDigest(password);
+      user.salt = credentials.salt;
+      user.passwordDigest = credentials.digest;
+    }
+    await this.persist();
+    return { username: user.username, role: user.role };
   }
 
   keyFor(token, scope, identity) {
@@ -273,6 +304,7 @@ export class MorbrService {
     const event = { id: randomUUID(), deploymentId, instanceId, type, payload: isolatedJson(payload).value, recordedAt: new Date().toISOString() };
     this.state.activity.push(event);
     await this.persist();
+    this.publishActivity(event);
     return structuredClone(event);
   }
 
@@ -318,6 +350,55 @@ export class MorbrService {
     return this.state.activity.filter((event) => event.deploymentId === deploymentId).map((event) => structuredClone(event));
   }
 
+  managementSnapshot(actor) {
+    const user = this.principalFor(actor);
+    return {
+      role: user.role,
+      canManage: user.role === "admin",
+      config: structuredClone(this.state.config),
+      authorizations: Object.values(this.state.keys).map((key) => this.managementAuthorization(key)),
+      deployments: Object.values(this.state.deployments).map(({ deploymentId, type, name, createdAt }) => ({ deploymentId, type, name, createdAt })),
+      instances: Object.values(this.state.instances).map(({ id, deploymentId, startedAt }) => ({ id, deploymentId, startedAt })),
+      users: Object.values(this.state.users).map(({ username, role }) => ({ username, role })),
+      activity: this.state.activity.map((event) => this.managementActivity(event)),
+      counts: {
+        deployments: Object.keys(this.state.deployments).length,
+        instances: Object.keys(this.state.instances).length,
+        users: Object.keys(this.state.users).length,
+        activeAuthorizations: Object.values(this.state.keys).filter((key) => !key.revoked).length,
+        activity: this.state.activity.length,
+      },
+    };
+  }
+
+  subscribeManagementActivity(actor, listener) {
+    this.principalFor(actor);
+    if (typeof listener !== "function") fail("INVALID_LISTENER");
+    const subscription = { actor, listener };
+    this.activitySubscriptions.add(subscription);
+    return { close: () => this.activitySubscriptions.delete(subscription) };
+  }
+
+  publishActivity(event) {
+    const dto = this.managementActivity(event);
+    for (const subscription of this.activitySubscriptions) {
+      try {
+        this.principalFor(subscription.actor);
+        subscription.listener(structuredClone(dto));
+      } catch (error) {
+        this.activitySubscriptions.delete(subscription);
+      }
+    }
+  }
+
+  managementAuthorization({ id, label, deploymentId, type, scopes, revoked }) {
+    return { id, label, deploymentId, type, scopes: [...scopes], revoked };
+  }
+
+  managementActivity({ id, deploymentId, instanceId, type, recordedAt }) {
+    return { id, deploymentId, instanceId, type, recordedAt };
+  }
+
   deploymentFor({ deploymentId, type }) {
     const deployment = this.state.deployments[deploymentId];
     if (!deployment) fail("DEPLOYMENT_NOT_FOUND");
@@ -328,4 +409,21 @@ export class MorbrService {
 
 export async function createMorbr(options) {
   return MorbrService.open(options);
+}
+
+/**
+ * Sanitized UI contract for FACTORY-1031. The facade intentionally exposes no
+ * `state`, password/key digests, or authoritative principal records.
+ */
+export function createManagementClient(service, actor) {
+  return Object.freeze({
+    getSnapshot: () => service.managementSnapshot(actor),
+    setConfig: (value) => service.setConfig(actor, value),
+    createUser: (details) => service.createUser(actor, details),
+    updateUser: (username, details) => service.updateUser(actor, username, details),
+    issueAuthorization: (details) => service.issueKey(actor, details),
+    updateAuthorization: (id, details) => service.updateAuthorization(actor, id, details),
+    revokeAuthorization: (id) => service.revokeKey(actor, id),
+    subscribeActivity: (listener) => service.subscribeManagementActivity(actor, listener),
+  });
 }

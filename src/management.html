@@ -2,7 +2,13 @@
 <html lang="en"><head><meta charset="utf-8"><title>Morbr Management</title></head>
 <body><div id="app"></div><script type="module">
   import { createFixtureManagementClient, createManagementApp } from "./management-ui.js";
-  const management = createManagementApp({ document, client: createFixtureManagementClient() });
+  import { createHttpManagementClient } from "./management-http.js";
+  // A controlled host may inject short-lived local connection settings here.
+  // They are never stored by the page or included in fixture mode.
+  const client = globalThis.morbrManagement
+    ? createHttpManagementClient(globalThis.morbrManagement)
+    : createFixtureManagementClient();
+  const management = createManagementApp({ document, client });
   document.querySelector("#app").append(management.root);
   management.render();
 </script></body></html>

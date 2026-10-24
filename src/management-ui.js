@@ -9,7 +9,7 @@ const fixture = {
     { id: "auth-butchr", type: "butchr", label: "Butchr control plane", deploymentId: "deploy-local", scopes: ["config"], revoked: false },
   ],
   deployments: [{ deploymentId: "deploy-local", type: "butchr", name: "Local Morbr", createdAt: "2026-10-24T13:00:00.000Z" }],
-  instances: [{ instanceId: "instance-fixture", deploymentId: "deploy-local", createdAt: "2026-10-24T13:58:00.000Z" }],
+  instances: [{ id: "instance-fixture", deploymentId: "deploy-local", startedAt: "2026-10-24T13:58:00.000Z" }],
   users: [{ username: "admin", role: "admin" }, { username: "reader", role: "reader" }],
   activity: [{ id: "activity-fixture", deploymentId: "deploy-local", instanceId: "instance-fixture", type: "resource.changed", recordedAt: "2026-10-24T13:58:00.000Z" }],
   counts: { connectedClients: 2, agents: 1 },
@@ -61,7 +61,7 @@ export function createManagementApp({ document, client }) {
         panel.append(article);
       });
     } else if (active === "Deployments") { panel.append(readOnlyList(document, snapshot.deployments, ["deploymentId", "type", "name", "createdAt"])); panel.append(element(document, "p", `Connected clients: ${snapshot.counts.connectedClients ?? 0}; agents: ${snapshot.counts.agents ?? 0}`)); }
-    else if (active === "Instances") { panel.append(readOnlyList(document, snapshot.instances, ["instanceId", "deploymentId", "createdAt"])); panel.append(readOnlyList(document, snapshot.activity, ["type", "recordedAt"])); }
+    else if (active === "Instances") { panel.append(readOnlyList(document, snapshot.instances, ["id", "deploymentId", "startedAt"])); panel.append(readOnlyList(document, snapshot.activity, ["type", "recordedAt"])); }
     else snapshot.users.forEach((user) => {
       const row = element(document, "div", `${user.username}: ${user.role}`);
       if (canManage) { const toggle = element(document, "button", "Toggle reader/admin"); toggle.addEventListener("click", async () => { await client.updateUser(user.username, { role: user.role === "admin" ? "reader" : "admin" }); await render(); }); row.append(" ", toggle); }

@@ -5,45 +5,91 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createMorbr, MorbrError } from "../src/index.js";
 
+const generic = { deploymentId: "deploy-generic", type: "generic" };
+const butchr = { deploymentId: "deploy-butchr", type: "butchr" };
+
 async function fixture() {
   const root = process.env.MORBR_TEST_TMPDIR ?? tmpdir();
   await mkdir(root, { recursive: true });
   const path = join(await mkdtemp(join(root, "morbr-test-")), "state.json");
   const service = await createMorbr({ statePath: path });
-  const admin = await service.createUser({ username: "admin", password: "fixture-password", role: "admin" });
-  const reader = await service.createUser({ username: "reader", password: "fixture-password", role: "reader" });
-  return { path, service, admin: service.authenticate({ username: admin.username, password: "fixture-password" }), reader: service.authenticate({ username: reader.username, password: "fixture-password" }) };
+  await service.createUser({ username: "admin", password: "fixture-password", role: "admin" });
+  const admin = service.authenticate({ username: "admin", password: "fixture-password" });
+  await service.createUser(admin, { username: "reader", password: "fixture-password", role: "reader" });
+  await service.registerDeployment(generic);
+  await service.registerDeployment(butchr);
+  return { path, service, admin, reader: service.authenticate({ username: "reader", password: "fixture-password" }) };
 }
 
-test("reader authorization cannot mutate stored config", async () => {
-  const { service, reader } = await fixture();
-  await assert.rejects(service.setConfig(reader, { enabled: true }), (error) => error instanceof MorbrError && error.code === "FORBIDDEN");
+function forbidden(error) {
+  return error instanceof MorbrError && ["UNAUTHORIZED", "FORBIDDEN"].includes(error.code);
+}
+
+test("principals are server-issued, immutable sessions with controlled bootstrap", async () => {
+  const { service, admin, reader } = await fixture();
+  await assert.rejects(service.setConfig({ sessionId: reader.sessionId, role: "admin" }, { enabled: true }), forbidden);
+  await assert.rejects(service.setConfig({ role: "admin" }, { enabled: true }), forbidden);
+  await assert.rejects(service.createUser({ username: "other-admin", password: "fixture-password", role: "admin" }), forbidden);
+  await service.createUser(admin, { username: "second-admin", password: "fixture-password", role: "admin" });
+  assert.equal((await service.setConfig(admin, { enabled: true })).version, 1);
 });
 
 test("revoked configuration key cannot access protected config", async () => {
   const { service, admin } = await fixture();
-  const key = await service.issueKey(admin, { scopes: ["config"], label: "disposable test key" });
+  const key = await service.issueKey(admin, { scopes: ["config"], ...generic, label: "disposable test key" });
   await service.setConfig(admin, { interval: 30 });
-  assert.deepEqual(service.getConfig(key.token), { version: 1, value: { interval: 30 } });
+  assert.deepEqual(service.getConfig(key.token, generic), { version: 1, value: { interval: 30 } });
   await service.revokeKey(admin, key.id);
-  assert.throws(() => service.getConfig(key.token), (error) => error instanceof MorbrError && error.code === "UNAUTHORIZED");
+  assert.throws(() => service.getConfig(key.token, generic), (error) => error instanceof MorbrError && error.code === "UNAUTHORIZED");
+});
+
+test("keys are constrained to their deployment and service type", async () => {
+  const { service, admin } = await fixture();
+  const key = await service.issueKey(admin, { scopes: ["config", "reporting"], ...generic });
+  const genericInstance = await service.startInstance(generic);
+  const butchrInstance = await service.startInstance(butchr);
+  await service.recordActivity(key.token, { ...generic, instanceId: genericInstance.id, type: "started" });
+  await assert.rejects(service.recordActivity(key.token, { ...butchr, instanceId: butchrInstance.id, type: "started" }), forbidden);
+  await assert.throws(() => service.getConfig(key.token, butchr), forbidden);
 });
 
 test("state survives reload while deployment identity is stable and instances are ephemeral", async () => {
   const { path, service, admin } = await fixture();
-  const key = await service.issueKey(admin, { scopes: ["reporting"] });
-  await service.registerDeployment({ deploymentId: "deploy-fixture", name: "fixture" });
-  const first = await service.startInstance({ deploymentId: "deploy-fixture" });
-  await service.recordActivity(key.token, { deploymentId: "deploy-fixture", instanceId: first.id, type: "started" });
+  const key = await service.issueKey(admin, { scopes: ["reporting"], ...generic });
+  const first = await service.startInstance(generic);
+  await service.recordActivity(key.token, { ...generic, instanceId: first.id, type: "started" });
 
   const reloaded = await createMorbr({ statePath: path });
-  const second = await reloaded.startInstance({ deploymentId: "deploy-fixture" });
+  const second = await reloaded.startInstance(generic);
   assert.notEqual(first.id, second.id);
-  assert.deepEqual(reloaded.listActivity(reloaded.authenticate({ username: "admin", password: "fixture-password" }), "deploy-fixture").map(({ type, deploymentId }) => ({ type, deploymentId })), [{ type: "started", deploymentId: "deploy-fixture" }]);
+  const reloadedAdmin = reloaded.authenticate({ username: "admin", password: "fixture-password" });
+  assert.deepEqual(reloaded.listActivity(reloadedAdmin, generic.deploymentId).map(({ type, deploymentId }) => ({ type, deploymentId })), [{ type: "started", deploymentId: generic.deploymentId }]);
 });
 
-test("config snapshots are de-duplicated", async () => {
+test("config and accepted activity payloads are isolated from caller mutation", async () => {
   const { service, admin } = await fixture();
-  assert.equal((await service.setConfig(admin, { mode: "safe" })).version, 1);
-  assert.equal((await service.setConfig(admin, { mode: "safe" })).version, 1);
+  const config = { mode: "safe" };
+  const key = await service.issueKey(admin, { scopes: ["config", "reporting"], ...generic });
+  await service.setConfig(admin, config);
+  config.mode = "unsafe";
+  assert.deepEqual(service.getConfig(key.token, generic), { version: 1, value: { mode: "safe" } });
+
+  const instance = await service.startInstance(generic);
+  const payload = { detail: "kept" };
+  await service.recordActivity(key.token, { ...generic, instanceId: instance.id, type: "started", payload });
+  payload.detail = "mutated";
+  assert.equal(service.listActivity(admin, generic.deploymentId)[0].payload.detail, "kept");
+});
+
+test("serialized saves retain the latest config and key revocation after overlap", async () => {
+  const { path, service, admin } = await fixture();
+  const key = await service.issueKey(admin, { scopes: ["config"], ...generic });
+  const first = service.setConfig(admin, { padding: "x".repeat(1_000_000) });
+  const second = service.setConfig(admin, { version: 2 });
+  const revoke = service.revokeKey(admin, key.id);
+  await Promise.all([first, second, revoke]);
+
+  const reloaded = await createMorbr({ statePath: path });
+  assert.deepEqual(reloaded.state.config, { version: 2, value: { version: 2 } });
+  assert.throws(() => reloaded.getConfig(key.token, generic), (error) => error instanceof MorbrError && error.code === "UNAUTHORIZED");
 });

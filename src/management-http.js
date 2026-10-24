@@ -3,11 +3,11 @@
  * Callers supply disposable credentials; nothing is persisted in this module.
  */
 export function createHttpManagementClient({ baseUrl, username, password, fetchImpl = globalThis.fetch }) {
-  if (!baseUrl || !username || password === undefined || typeof fetchImpl !== "function") throw new TypeError("baseUrl, username, password, and fetch are required");
-  const endpoint = new URL(baseUrl);
-  const authorization = `Basic ${btoa(`${username}:${password}`)}`;
+  if (!baseUrl || typeof fetchImpl !== "function" || ((username === undefined) !== (password === undefined))) throw new TypeError("baseUrl, fetch, and both username/password when direct credentials are used are required");
+  const endpoint = new URL(baseUrl, globalThis.location?.href).toString().replace(/\/?$/, "/");
+  const authorization = username === undefined ? undefined : `Basic ${base64Utf8(`${username}:${password}`)}`;
   const request = async (path, options = {}) => {
-    const response = await fetchImpl(new URL(path, endpoint), { ...options, headers: { authorization, accept: "application/json", ...options.headers } });
+    const response = await fetchImpl(new URL(path.replace(/^\//, ""), endpoint), { ...options, headers: { ...(authorization ? { authorization } : {}), accept: "application/json", ...options.headers } });
     if (!response.ok) { const error = new Error((await response.json().catch(() => ({}))).code ?? `HTTP_${response.status}`); error.status = response.status; throw error; }
     return response.status === 204 ? undefined : response.json();
   };
@@ -22,7 +22,7 @@ export function createHttpManagementClient({ baseUrl, username, password, fetchI
     subscribeActivity(listener) {
       const controller = new AbortController();
       (async () => {
-        const response = await fetchImpl(new URL("/events/activity", endpoint), { headers: { authorization, accept: "text/event-stream" }, signal: controller.signal });
+        const response = await fetchImpl(new URL("events/activity", endpoint), { headers: { ...(authorization ? { authorization } : {}), accept: "text/event-stream" }, signal: controller.signal });
         if (!response.ok || !response.body) throw new Error(`HTTP_${response.status}`);
         const reader = response.body.getReader(); const decoder = new TextDecoder(); let pending = "";
         while (!controller.signal.aborted) {
@@ -35,4 +35,11 @@ export function createHttpManagementClient({ baseUrl, username, password, fetchI
       return { close: () => controller.abort() };
     },
   });
+}
+
+function base64Utf8(value) {
+  if (typeof Buffer !== "undefined") return Buffer.from(value, "utf8").toString("base64");
+  let binary = "";
+  for (const byte of new TextEncoder().encode(value)) binary += String.fromCharCode(byte);
+  return btoa(binary);
 }

@@ -19,9 +19,10 @@ test("HTTP management bridge uses sanitized DTOs and propagates edits/activity",
   const root = process.env.MORBR_TEST_TMPDIR ?? tmpdir();
   await mkdir(root, { recursive: true });
   const service = await createMorbr({ statePath: join(await mkdtemp(join(root, "morbr-ui-http-")), "state.json") });
-  await service.createUser({ username: "admin", password: "fixture-password", role: "admin" });
-  const admin = service.authenticate({ username: "admin", password: "fixture-password" });
-  await service.createUser(admin, { username: "reader", password: "fixture-password", role: "reader" });
+  const password = "fixturé漢";
+  await service.createUser({ username: "admin", password, role: "admin" });
+  const admin = service.authenticate({ username: "admin", password });
+  await service.createUser(admin, { username: "reader", password, role: "reader" });
   await service.registerDeployment({ ...identity, name: "UI fixture" });
   const instance = await service.startInstance(identity);
   const reporting = await service.issueKey(admin, { ...identity, scopes: ["reporting"], label: "test reporting" });
@@ -29,7 +30,7 @@ test("HTTP management bridge uses sanitized DTOs and propagates edits/activity",
   const address = await transport.start();
   const baseUrl = `http://127.0.0.1:${address.port}`;
   try {
-    const client = createHttpManagementClient({ baseUrl, username: "admin", password: "fixture-password" });
+    const client = createHttpManagementClient({ baseUrl, username: "admin", password });
     const initial = await client.getSnapshot();
     assert.deepEqual(initial.instances[0], { id: instance.id, deploymentId: identity.deploymentId, startedAt: instance.startedAt });
     assert.equal(JSON.stringify(initial).match(/passwordDigest|salt|token/i), null);
@@ -42,7 +43,7 @@ test("HTTP management bridge uses sanitized DTOs and propagates edits/activity",
     await waitFor(() => observed.length === 1);
     assert.deepEqual(observed[0], { id: observed[0].id, deploymentId: identity.deploymentId, instanceId: instance.id, type: "fixture.changed", recordedAt: observed[0].recordedAt });
     subscription.close();
-    const reader = createHttpManagementClient({ baseUrl, username: "reader", password: "fixture-password" });
+    const reader = createHttpManagementClient({ baseUrl, username: "reader", password });
     await assert.rejects(() => reader.setConfig({ forbidden: true }), /FORBIDDEN/);
   } finally {
     await transport.close();

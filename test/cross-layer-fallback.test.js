@@ -16,7 +16,10 @@ test("actual Morbr demand refresh fails retryably then permits only capable loca
   const upstreamArguments = []; const localArguments = [];
   const upstream = createMorbin({ providers: { source: { fetch: async resource => {
     upstreamArguments.push(resource); upstreamCalls += 1;
-    if (failUpstream) throw new Error("retryable fake upstream outage");
+    if (failUpstream) {
+      const error = Object.assign(new Error("retryable fake upstream outage"), { code: "PROVIDER_UNAVAILABLE", retryable: true });
+      throw error;
+    }
     return { revision: upstreamCalls };
   } } }, freshness: { pull: [2, 2], upstream: [2, 2], push: [4, 4] }, now: () => clock });
   const statePath = join(await mkdtemp(join(tmpdir(), "factory-1033-final-")), "state.json");
@@ -34,11 +37,11 @@ test("actual Morbr demand refresh fails retryably then permits only capable loca
     const local = createMorbin({ providers, freshness: { pull: [5, 5], upstream: [5, 5], push: [5, 5] }, now: () => clock });
     const daemon = createButchrd({ store: { get: k => values.get(k), set: (k, v) => values.set(k, v) }, morbin: local, local: { capabilities: capable, providers: capable ? { local: {} } : {}, freshness: { pull: [5, 5], upstream: [5, 5] } } });
     const identity = { deploymentId: daemon.deploymentId, type: "generic" }; await service.registerDeployment(identity); const instance = await service.startInstance(identity); const key = await service.issueKey(admin, { ...identity, scopes: ["reporting"], label: capable ? "capable" : "incapable" });
-    let reader;
-    const transport = { subscribe: async ({ onEnvelope }) => { const u = `http://127.0.0.1:${address.port}/events/resource?deploymentId=${identity.deploymentId}&type=generic&instanceId=${instance.id}&provider=source&resource=r&subject=resource-r&subscriptionId=resource&streamEpoch=1`; const response = await fetch(u, { headers: { authorization: `Bearer ${key.token}` } }); reader = response.body.getReader(); void (async () => { let text = ""; for (;;) { const part = await reader.read(); if (part.done) break; text += new TextDecoder().decode(part.value); let end; while ((end = text.indexOf("\n\n")) >= 0) { const data = text.slice(0, end).match(/^data: (.+)$/m)?.[1]; text = text.slice(end + 2); if (data) onEnvelope(JSON.parse(data)); } } })(); return { close: () => void reader.cancel() }; } };
+    const envelopes = []; let reader;
+    const transport = { subscribe: async ({ onEnvelope }) => { const u = `http://127.0.0.1:${address.port}/events/resource?deploymentId=${identity.deploymentId}&type=generic&instanceId=${instance.id}&provider=source&resource=r&subject=resource-r&subscriptionId=resource&streamEpoch=1`; const response = await fetch(u, { headers: { authorization: `Bearer ${key.token}` } }); reader = response.body.getReader(); void (async () => { let text = ""; for (;;) { const part = await reader.read(); if (part.done) break; text += new TextDecoder().decode(part.value); let end; while ((end = text.indexOf("\n\n")) >= 0) { const data = text.slice(0, end).match(/^data: (.+)$/m)?.[1]; text = text.slice(end + 2); if (data) { const envelope = JSON.parse(data); envelopes.push(envelope); onEnvelope(envelope); } } } })(); return { close: () => void reader.cancel() }; } };
     const connected = createButchrd({ store: { get: k => values.get(k), set: (k, v) => values.set(k, v) }, morbin: local, local: { capabilities: capable, providers: capable ? { local: {} } : {}, freshness: { pull: [5, 5], upstream: [5, 5] }, pollIntervalMs: capable ? 1 : undefined, transport } });
     const run = await connected.start({ mode: "connected", connectedSubscriptions: [{ id: "resource", subject: { kind: "resource", key: "resource-r" }, watchMode: "resource", provider: "local", resource: "r" }] });
-    return { connected, run, reportingToken: key.token, hasLocalProvider: Object.hasOwn(providers, "local") };
+    return { connected, run, envelopes, reportingToken: key.token, hasLocalProvider: Object.hasOwn(providers, "local") };
   };
   const capable = await makeDaemon(true); const incapable = await makeDaemon(false);
   try {
@@ -61,7 +64,12 @@ test("actual Morbr demand refresh fails retryably then permits only capable loca
 
     failUpstream = true;
     clock = 6;
-    await eventually(() => service.listActivity(admin, capable.connected.deploymentId).some(e => e.type === "morbin.error"));
+    await eventually(() => capable.envelopes.some(e => e.kind === "error" && e.error?.code === "PROVIDER_UNAVAILABLE"));
+    const wireError = capable.envelopes.find(e => e.kind === "error" && e.error?.code === "PROVIDER_UNAVAILABLE");
+    const persistedError = service.listActivity(admin, capable.connected.deploymentId).find(e => e.type === "morbin.error");
+    assert.equal(wireError.error.retryable, true, "the SSE wire preserves a retryable provider outage");
+    assert.equal(persistedError.payload.error.retryable, true, "persisted Morbr activity preserves the retryable outage");
+    assert.ok(service.morbinSubscriptions.size > 0 && service.demandPollTimer, "retryable outage leaves central demand live before explicit stop");
     clock = 9;
     await eventually(() => capableCalls === 1);
     assert.deepEqual(await capable.connected.monitoring.read("local", "r"), { revision: "local-1" });

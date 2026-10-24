@@ -49,9 +49,7 @@ function safeMorbinEvent(event) {
     copy.error = {
       code: String(event.error.code ?? "ERROR"),
       message: String(event.error.message ?? "Morbin stream error"),
-      // Morbr only persists terminal stream errors; retry behavior remains the
-      // Morbin transport's concern and must not be reinterpreted after reload.
-      retryable: false,
+      retryable: event.error.retryable === true,
     };
   }
   return isolatedJson(copy).value;
@@ -254,7 +252,9 @@ export class MorbrService {
     this.keyFor(token, "config", identity);
     const subscription = { token, identity: structuredClone(identity), listener };
     this.configSubscriptions.add(subscription);
-    listener(structuredClone(this.state.config));
+    const initial = structuredClone(this.state.config);
+    subscription.lastVersion = initial.version;
+    listener(initial);
     return { close: () => this.configSubscriptions.delete(subscription) };
   }
 
@@ -262,7 +262,9 @@ export class MorbrService {
     const delivery = this.configDelivery.then(() => {
       for (const subscription of this.configSubscriptions) {
         try {
+          if (snapshot.version <= subscription.lastVersion) continue;
           this.keyFor(subscription.token, "config", subscription.identity);
+          subscription.lastVersion = snapshot.version;
           subscription.listener(structuredClone(snapshot));
         } catch (error) {
           // Revocation/authorization terminates delivery without emitting state.

@@ -20,8 +20,8 @@ activity. It is not an autonomous task launcher and it does not execute events.
   disposable fixtures only; no live credential or deployment configuration is
   included.
 
-Morbin config/event-stream integration is deliberately outside this initial
-service implementation: Morbr consumes the approved pinned Morbin library
+Morbin remains a separate shared-library implementation: Morbr consumes the
+approved pinned Morbin library
 (`39e47eb8089e6ef17426e8607beec21759b30c40`) through its public API. Morbr
 adapts resource-stream envelopes into persisted activity and can ingest upstream
 events through Morbin; it does not copy polling or replay mechanics and never
@@ -29,6 +29,15 @@ passes a Morbr credential to a provider. Config consumers receive an immediate
 snapshot and each committed, de-duplicated change in version order until their
 scoped key is revoked. Terminal Morbin stream errors are retained as safe plain
 data (`code`, `message`, `retryable: false`) for live consumers and reloads.
+
+## Current transport scope
+
+The exported service implements persisted local state, config subscriptions,
+Morbin resource-stream consumption, and `ingestMorbinEvent` for authorized
+upstream/client event chaining. A remote HTTP transport (including request
+routing and webhook signature/receiver policy) has not been implemented in
+this package yet; it remains explicit FACTORY-1030 work, along with the full
+cross-repository verification owned by FACTORY-1033.
 
 ## Management UI boundary
 

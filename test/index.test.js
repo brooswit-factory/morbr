@@ -118,6 +118,18 @@ test("configuration subscribers receive isolated snapshots and stop after revoca
   assert.equal(received.length, 2);
 });
 
+test("overlapping config commits are delivered once each in committed version order", async () => {
+  const { service, admin } = await fixture();
+  const key = await service.issueKey(admin, { scopes: ["config"], ...generic });
+  const versions = [];
+  service.subscribeConfig(key.token, generic, (config) => versions.push(config.version));
+  await Promise.all([
+    service.setConfig(admin, { step: "first" }),
+    service.setConfig(admin, { step: "second" }),
+  ]);
+  assert.deepEqual(versions, [0, 1, 2]);
+});
+
 test("Morbin events are consumed through the pinned library and persisted without key propagation", async () => {
   const morbin = createMorbin({ providers: { fake: { fetch: async () => ({ id: "resource-1", revision: 1 }) } } });
   const root = process.env.MORBR_TEST_TMPDIR ?? tmpdir();
@@ -137,4 +149,26 @@ test("Morbin events are consumed through the pinned library and persisted withou
   await waitFor(() => observed.length === 2);
   assert.equal(observed[1].data.revision, 2);
   stream.close();
+});
+
+test("terminal Morbin errors retain safe plain-data details live and after reload", async () => {
+  const terminal = Object.assign(new Error("access revoked"), { code: "UNAUTHORIZED", retryable: false });
+  const morbin = createMorbin({ providers: { denied: { fetch: async () => { throw terminal; } } } });
+  const root = process.env.MORBR_TEST_TMPDIR ?? tmpdir();
+  await mkdir(root, { recursive: true });
+  const path = join(await mkdtemp(join(root, "morbr-error-")), "state.json");
+  const service = await createMorbr({ statePath: path, morbin });
+  await service.createUser({ username: "admin", password: "fixture-password", role: "admin" });
+  const admin = service.authenticate({ username: "admin", password: "fixture-password" });
+  await service.registerDeployment(generic);
+  const key = await service.issueKey(admin, { scopes: ["reporting"], ...generic });
+  const instance = await service.startInstance(generic);
+  const observed = [];
+  service.subscribeMorbinEvents(admin, { reportingToken: key.token, identity: generic, instanceId: instance.id, provider: "denied", resource: "resource-1", listener: (event) => observed.push(event) });
+  await waitFor(() => observed.length === 1);
+  assert.deepEqual(observed[0].error, { code: "UNAUTHORIZED", message: "UNAUTHORIZED", retryable: false });
+
+  const reloaded = await createMorbr({ statePath: path });
+  const reloadedAdmin = reloaded.authenticate({ username: "admin", password: "fixture-password" });
+  assert.deepEqual(reloaded.listActivity(reloadedAdmin, generic.deploymentId)[0].payload.error, { code: "UNAUTHORIZED", message: "UNAUTHORIZED", retryable: false });
 });

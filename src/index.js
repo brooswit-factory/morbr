@@ -43,6 +43,20 @@ function isolatedJson(value, errorCode = "INVALID_DATA") {
   }
 }
 
+function safeMorbinEvent(event) {
+  const copy = { ...event };
+  if (event?.error) {
+    copy.error = {
+      code: String(event.error.code ?? "ERROR"),
+      message: String(event.error.message ?? "Morbin stream error"),
+      // Morbr only persists terminal stream errors; retry behavior remains the
+      // Morbin transport's concern and must not be reinterpreted after reload.
+      retryable: false,
+    };
+  }
+  return isolatedJson(copy).value;
+}
+
 function emptyState() {
   return {
     version: STATE_VERSION,
@@ -110,6 +124,7 @@ export class MorbrService {
     this.sessions = new Map();
     this.morbin = morbin;
     this.configSubscriptions = new Set();
+    this.configDelivery = Promise.resolve();
   }
 
   async persist() {
@@ -190,8 +205,10 @@ export class MorbrService {
     // De-duplicate equivalent snapshots so subscribers see semantic changes only.
     if (JSON.stringify(this.state.config.value) !== snapshot.encoded) {
       this.state.config = { version: this.state.config.version + 1, value: snapshot.value };
+      const committed = structuredClone(this.state.config);
       await this.persist();
-      this.publishConfig();
+      await this.publishConfig(committed);
+      return committed;
     }
     return structuredClone(this.state.config);
   }
@@ -210,16 +227,20 @@ export class MorbrService {
     return { close: () => this.configSubscriptions.delete(subscription) };
   }
 
-  publishConfig() {
-    for (const subscription of this.configSubscriptions) {
-      try {
-        this.keyFor(subscription.token, "config", subscription.identity);
-        subscription.listener(structuredClone(this.state.config));
-      } catch (error) {
-        // Revocation/authorization terminates delivery without emitting state.
-        this.configSubscriptions.delete(subscription);
+  publishConfig(snapshot) {
+    const delivery = this.configDelivery.then(() => {
+      for (const subscription of this.configSubscriptions) {
+        try {
+          this.keyFor(subscription.token, "config", subscription.identity);
+          subscription.listener(structuredClone(snapshot));
+        } catch (error) {
+          // Revocation/authorization terminates delivery without emitting state.
+          this.configSubscriptions.delete(subscription);
+        }
       }
-    }
+    });
+    this.configDelivery = delivery.catch(() => {});
+    return delivery;
   }
 
   async registerDeployment({ deploymentId, type, name = "" }) {
@@ -270,13 +291,14 @@ export class MorbrService {
     let close = () => {};
     const subscription = this.morbin.watchResource(provider, resource, async (event) => {
       try {
+        const safeEvent = safeMorbinEvent(event);
         await this.recordActivity(reportingToken, {
           deploymentId: deployment.deploymentId,
           instanceId,
-          type: `morbin.${event.kind}`,
-          payload: event,
+          type: `morbin.${safeEvent.kind}`,
+          payload: safeEvent,
         });
-        listener(structuredClone(event));
+        listener(structuredClone(safeEvent));
       } catch (error) {
         if (error instanceof MorbrError && ["UNAUTHORIZED", "FORBIDDEN"].includes(error.code)) close();
       }

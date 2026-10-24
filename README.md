@@ -26,7 +26,9 @@ service implementation: Morbr consumes the approved pinned Morbin library
 adapts resource-stream envelopes into persisted activity and can ingest upstream
 events through Morbin; it does not copy polling or replay mechanics and never
 passes a Morbr credential to a provider. Config consumers receive an immediate
-snapshot and de-duplicated changes until their scoped key is revoked.
+snapshot and each committed, de-duplicated change in version order until their
+scoped key is revoked. Terminal Morbin stream errors are retained as safe plain
+data (`code`, `message`, `retryable: false`) for live consumers and reloads.
 
 ## Build and verify
 

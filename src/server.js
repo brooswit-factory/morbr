@@ -11,7 +11,10 @@ function send(response, status, body) {
 function basicCredentials(request) {
   const match = /^Basic\s+(.+)$/i.exec(request.headers.authorization ?? "");
   if (!match) return null;
-  const [username, password] = Buffer.from(match[1], "base64").toString("utf8").split(":", 2);
+  const decoded = Buffer.from(match[1], "base64").toString("utf8");
+  const separator = decoded.indexOf(":");
+  const username = decoded.slice(0, separator);
+  const password = decoded.slice(separator + 1);
   return username && password !== undefined ? { username, password } : null;
 }
 
@@ -47,9 +50,18 @@ function event(response, name, payload) {
  * startup; nothing in this module persists a bearer token or webhook secret.
  */
 export function createMorbrHttpServer({ service, webhookBindings = {} }) {
+  const streams = new Set();
+  function closeStream(stream, error) {
+    if (!streams.delete(stream)) return;
+    stream.subscription?.close();
+    if (!stream.response.writableEnded) {
+      if (error) event(stream.response, "error", { code: error.code ?? "UNAUTHORIZED", retryable: false });
+      stream.response.end();
+    }
+  }
   const server = createServer(async (request, response) => {
-    const url = new URL(request.url, "http://morbr.local");
     try {
+      const url = new URL(request.url, "http://morbr.local");
       if (request.method === "GET" && url.pathname === "/management") {
         const credentials = basicCredentials(request);
         if (!credentials) return send(response, 401, { code: "UNAUTHORIZED" });
@@ -63,6 +75,31 @@ export function createMorbrHttpServer({ service, webhookBindings = {} }) {
         return send(response, 200, config);
       }
 
+      if (request.method === "POST" && url.pathname === "/management/users") {
+        const actor = service.authenticate(basicCredentials(request) ?? {});
+        return send(response, 201, await service.createUser(actor, await readJson(request)));
+      }
+      const user = /^\/management\/users\/([^/]+)$/.exec(url.pathname);
+      if (request.method === "PATCH" && user) {
+        const actor = service.authenticate(basicCredentials(request) ?? {});
+        return send(response, 200, await service.updateUser(actor, decodeURIComponent(user[1]), await readJson(request)));
+      }
+      if (request.method === "POST" && url.pathname === "/management/authorizations") {
+        const actor = service.authenticate(basicCredentials(request) ?? {});
+        const issued = await service.issueKey(actor, await readJson(request));
+        return send(response, 201, issued);
+      }
+      const authorization = /^\/management\/authorizations\/([^/]+)$/.exec(url.pathname);
+      if (request.method === "PATCH" && authorization) {
+        const actor = service.authenticate(basicCredentials(request) ?? {});
+        return send(response, 200, await service.updateAuthorization(actor, decodeURIComponent(authorization[1]), await readJson(request)));
+      }
+      if (request.method === "DELETE" && authorization) {
+        const actor = service.authenticate(basicCredentials(request) ?? {});
+        await service.revokeKey(actor, decodeURIComponent(authorization[1]));
+        return send(response, 204, {});
+      }
+
       if (request.method === "GET" && url.pathname === "/events/config") {
         const token = bearerToken(request);
         if (!token) return send(response, 401, { code: "UNAUTHORIZED" });
@@ -70,9 +107,14 @@ export function createMorbrHttpServer({ service, webhookBindings = {} }) {
         // Authorize before committing the SSE response headers so denials stay
         // ordinary HTTP errors rather than a half-open event stream.
         service.getConfig(token, requestedIdentity);
+        const stream = { response, subscription: null, sequence: 0 };
         response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
-        const subscription = service.subscribeConfig(token, requestedIdentity, (config) => event(response, "config", config));
-        request.once("close", () => subscription.close());
+        stream.subscription = service.subscribeConfig(token, requestedIdentity, (config) => {
+          const kind = stream.sequence === 0 ? "snapshot" : "change";
+          event(response, "config", { contractVersion: "1.0", kind, sequence: ++stream.sequence, subject: { kind: "config", key: `${requestedIdentity.type}:${requestedIdentity.deploymentId}` }, data: config.value, meta: { emittedAt: new Date().toISOString(), source: "morbr" } });
+        }, (error) => closeStream(stream, error));
+        streams.add(stream);
+        request.once("close", () => closeStream(stream));
         return;
       }
 
@@ -81,8 +123,9 @@ export function createMorbrHttpServer({ service, webhookBindings = {} }) {
         if (!credentials) return send(response, 401, { code: "UNAUTHORIZED" });
         const actor = service.authenticate(credentials);
         response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
-        const subscription = service.subscribeManagementActivity(actor, (activity) => event(response, "activity", activity));
-        request.once("close", () => subscription.close());
+        const stream = { response, subscription: service.subscribeManagementActivity(actor, (activity) => event(response, "activity", activity)) };
+        streams.add(stream);
+        request.once("close", () => closeStream(stream));
         return;
       }
 
@@ -127,6 +170,7 @@ export function createMorbrHttpServer({ service, webhookBindings = {} }) {
       return server.address();
     },
     async close() {
+      for (const stream of [...streams]) closeStream(stream);
       if (!server.listening) return;
       await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     },

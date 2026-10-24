@@ -247,10 +247,10 @@ export class MorbrService {
     return structuredClone(this.state.config);
   }
 
-  subscribeConfig(token, identity, listener) {
+  subscribeConfig(token, identity, listener, onClose = () => {}) {
     if (typeof listener !== "function") fail("INVALID_LISTENER");
     this.keyFor(token, "config", identity);
-    const subscription = { token, identity: structuredClone(identity), listener };
+    const subscription = { token, identity: structuredClone(identity), listener, onClose };
     this.configSubscriptions.add(subscription);
     const initial = structuredClone(this.state.config);
     subscription.lastVersion = initial.version;
@@ -269,6 +269,7 @@ export class MorbrService {
         } catch (error) {
           // Revocation/authorization terminates delivery without emitting state.
           this.configSubscriptions.delete(subscription);
+          subscription.onClose(error instanceof MorbrError ? error : new MorbrError("UNAUTHORIZED"));
         }
       }
     });

@@ -4,6 +4,7 @@ import { mkdir, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHmac } from "node:crypto";
+import { connect } from "node:net";
 import { createMorbin } from "@brooswit-factory/morbin";
 import { createManagementClient, createMorbr, createMorbrHttpServer, MorbrError } from "../src/index.js";
 
@@ -237,16 +238,16 @@ test("HTTP/SSE/webhook transport authorizes requests and records signed fixture 
   const path = join(await mkdtemp(join(root, "morbr-http-")), "state.json");
   const morbin = createMorbin({ providers: { fake: { fetch: async () => ({ id: "resource-1" }) } } });
   const service = await createMorbr({ statePath: path, morbin });
-  await service.createUser({ username: "admin", password: "fixture-password", role: "admin" });
-  const admin = service.authenticate({ username: "admin", password: "fixture-password" });
-  await service.createUser(admin, { username: "reader", password: "fixture-password", role: "reader" });
+  await service.createUser({ username: "admin", password: "fixture-password:colon", role: "admin" });
+  const admin = service.authenticate({ username: "admin", password: "fixture-password:colon" });
+  await service.createUser(admin, { username: "reader", password: "fixture-password:colon", role: "reader" });
   await service.registerDeployment(generic);
   const key = await service.issueKey(admin, { scopes: ["config", "reporting"], ...generic });
   const instance = await service.startInstance(generic);
   const http = createMorbrHttpServer({ service, webhookBindings: { fixture: { secret: "fixture-secret", reportingToken: key.token, identity: generic, instanceId: instance.id } } });
   const address = await http.start();
   const base = `http://127.0.0.1:${address.port}`;
-  const basic = (username) => `Basic ${Buffer.from(`${username}:fixture-password`).toString("base64")}`;
+  const basic = (username) => `Basic ${Buffer.from(`${username}:fixture-password:colon`).toString("base64")}`;
   try {
     const management = await fetch(`${base}/management`, { headers: { authorization: basic("reader") } });
     assert.equal(management.status, 200);
@@ -265,7 +266,6 @@ test("HTTP/SSE/webhook transport authorizes requests and records signed fixture 
     assert.equal(updated.status, 200);
     const second = new TextDecoder().decode((await streamReader.read()).value);
     assert.match(second, /"mode":"admin"/);
-    await streamReader.cancel();
 
     const webhook = { provider: "fake", resource: "resource-1", value: { id: "resource-1", revision: 2 }, cursor: "c2" };
     const body = JSON.stringify(webhook);
@@ -276,8 +276,41 @@ test("HTTP/SSE/webhook transport authorizes requests and records signed fixture 
     assert.equal(accepted.status, 202);
     assert.equal(service.listActivity(admin, generic.deploymentId).at(-1).type, "webhook");
     await service.revokeKey(admin, key.id);
+    await service.setConfig(admin, { mode: "after-revoke" });
+    const revokedEvent = new TextDecoder().decode((await streamReader.read()).value);
+    assert.match(revokedEvent, /event: error/);
+    assert.match(revokedEvent, /"code":"UNAUTHORIZED"/);
+    assert.equal((await streamReader.read()).done, true);
     const revoked = await fetch(`${base}/events/config?deploymentId=${generic.deploymentId}&type=${generic.type}`, { headers: { authorization: `Bearer ${key.token}` } });
     assert.equal(revoked.status, 401);
+  } finally {
+    await http.close();
+  }
+});
+
+test("transport contains malformed targets and shutdown terminates an open SSE stream", async () => {
+  const { service, admin } = await fixture();
+  const key = await service.issueKey(admin, { scopes: ["config"], ...generic });
+  const http = createMorbrHttpServer({ service });
+  const address = await http.start();
+  const base = `http://127.0.0.1:${address.port}`;
+  try {
+    const malformed = await new Promise((resolve, reject) => {
+      let received = "";
+      const socket = connect(address.port, "127.0.0.1");
+      socket.on("error", reject);
+      socket.on("connect", () => socket.write("GET http://[ HTTP/1.1\r\nHost: fixture\r\nConnection: close\r\n\r\n"));
+      socket.on("data", (chunk) => { received += chunk; });
+      socket.on("end", () => resolve(received));
+    });
+    assert.match(malformed, /400/);
+    const valid = await fetch(`${base}/management`, { headers: { authorization: `Basic ${Buffer.from("admin:fixture-password").toString("base64")}` } });
+    assert.equal(valid.status, 200);
+    const stream = await fetch(`${base}/events/config?deploymentId=${generic.deploymentId}&type=${generic.type}`, { headers: { authorization: `Bearer ${key.token}` } });
+    const reader = stream.body.getReader();
+    await reader.read();
+    await http.close();
+    assert.equal((await reader.read()).done, true);
   } finally {
     await http.close();
   }

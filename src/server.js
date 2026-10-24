@@ -159,6 +159,7 @@ export function createMorbrHttpServer({ service, webhookBindings = {} }) {
             event(response, "resource", envelope);
             if (upstream.kind === "error" && upstream.error?.retryable === false) closeStream(stream);
           },
+          onClose: (error) => closeStream(stream, error),
         });
         streams.add(stream);
         request.once("close", () => closeStream(stream));

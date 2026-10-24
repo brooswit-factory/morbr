@@ -123,12 +123,12 @@ export class JsonStateStore {
  */
 export class MorbrService {
   static async open(options) {
-    const { statePath, morbin = null, upstreamFreshness, demandPollIntervalMs, connectedPollMinimumMs } = options;
+    const { statePath, morbin = null, upstreamFreshness, morbinFreshness, demandPollIntervalMs, connectedPollMinimumMs } = options;
     const store = new JsonStateStore(statePath);
-    return new MorbrService(store, await store.load(), morbin, { upstreamFreshness, demandPollIntervalMs, connectedPollMinimumMs });
+    return new MorbrService(store, await store.load(), morbin, { upstreamFreshness, morbinFreshness, demandPollIntervalMs, connectedPollMinimumMs });
   }
 
-  constructor(store, state, morbin = null, { upstreamFreshness, demandPollIntervalMs, connectedPollMinimumMs } = {}) {
+  constructor(store, state, morbin = null, { upstreamFreshness, morbinFreshness, demandPollIntervalMs, connectedPollMinimumMs } = {}) {
     this.store = store;
     this.state = state;
     this.sessions = new Map();
@@ -137,6 +137,13 @@ export class MorbrService {
     this.configDelivery = Promise.resolve();
     this.activitySubscriptions = new Set();
     this.upstreamFreshness = freshnessBounds(upstreamFreshness);
+    if (morbinFreshness?.upstream) {
+      const [minimumMs, maximumMs] = morbinFreshness.upstream;
+      const actual = freshnessBounds({ minimumMs, maximumMs });
+      if (actual.minimumMs !== this.upstreamFreshness.minimumMs || actual.maximumMs !== this.upstreamFreshness.maximumMs) {
+        fail("FRESHNESS_BOUNDS_MISMATCH");
+      }
+    }
     this.demandPollIntervalMs = demandPollIntervalMs ?? this.upstreamFreshness.maximumMs + 1;
     if (!Number.isFinite(this.demandPollIntervalMs) || this.demandPollIntervalMs <= 0) fail("INVALID_DEMAND_POLL_INTERVAL");
     if (connectedPollMinimumMs !== undefined) {
@@ -346,13 +353,14 @@ export class MorbrService {
    * the explicit provider/resource mapping; Morbr never derives it from an
    * opaque downstream subject or forwards its reporting token to a provider.
    */
-  subscribeMorbinResource({ reportingToken, identity, instanceId, provider, resource, listener = () => {} }) {
+  subscribeMorbinResource({ reportingToken, identity, instanceId, provider, resource, listener = () => {}, onClose = () => {} }) {
     if (!this.morbin?.watchResource) fail("MORBIN_NOT_CONFIGURED");
     const deployment = this.deploymentFor(identity);
     const instance = this.state.instances[instanceId];
     if (!instance || instance.deploymentId !== deployment.deploymentId) fail("UNKNOWN_IDENTITY");
     this.keyFor(reportingToken, "reporting", deployment);
-    let close = () => {};
+    let managed;
+    const terminate = (error) => managed?.close(error instanceof MorbrError ? error : new MorbrError("UNAUTHORIZED"));
     const subscription = this.morbin.watchResource(provider, resource, async (event) => {
       try {
         const safeEvent = safeMorbinEvent(event);
@@ -363,21 +371,24 @@ export class MorbrService {
           payload: safeEvent,
         });
         listener(structuredClone(safeEvent));
+        if (safeEvent.kind === "error" && safeEvent.error?.retryable === false) {
+          terminate(new MorbrError(safeEvent.error.code, safeEvent.error.message));
+        }
       } catch (error) {
-        if (error instanceof MorbrError && ["UNAUTHORIZED", "FORBIDDEN"].includes(error.code)) close();
+        if (error instanceof MorbrError && ["UNAUTHORIZED", "FORBIDDEN"].includes(error.code)) terminate(error);
       }
     });
-    const managed = {
+    managed = {
       id: subscription.id,
       provider: String(provider),
       resource: isolatedJson(resource).value,
-      close: () => {
+      close: (error) => {
         if (!this.morbinSubscriptions.delete(subscription.id)) return;
         subscription.close();
         this.stopDemandPollingIfIdle();
+        if (error) onClose(error);
       },
     };
-    close = managed.close;
     this.morbinSubscriptions.set(subscription.id, managed);
     this.startDemandPolling();
     return { id: managed.id, close: managed.close };

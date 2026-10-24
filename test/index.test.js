@@ -196,6 +196,15 @@ test("connected poll minimum must exceed Morbr's published upstream maximum", as
     }),
     (error) => error instanceof RangeError,
   );
+  await assert.rejects(
+    createMorbr({
+      statePath: path,
+      morbin: createMorbin({ freshness: { pull: [100, 100], upstream: [100, 100], push: [100, 100] } }),
+      upstreamFreshness: { minimumMs: 4, maximumMs: 6 },
+      morbinFreshness: { upstream: [100, 100] },
+    }),
+    (error) => error instanceof MorbrError && error.code === "FRESHNESS_BOUNDS_MISMATCH",
+  );
 });
 
 test("Morbin events are consumed through the pinned library and persisted without key propagation", async () => {
@@ -323,10 +332,31 @@ test("resource SSE preserves an opaque subject while the client supplies provide
     assert.deepEqual(envelope.subject, { kind: "resource", key: "central-resource/opaque:42" });
     assert.deepEqual(envelope.meta.upstreamFreshness, { minimumMs: 4_000, maximumMs: 6_000, demandPollIntervalMs: 6_001 });
     assert.deepEqual(envelope.data, { id: "resource-1", revision: 1 });
-    await reader.cancel();
+    await service.revokeKey(admin, key.id);
+    await morbin.receive({ provider: "fake", resource: "resource-1", value: { id: "resource-1", revision: 2 }, cursor: "revoked" });
+    const terminal = new TextDecoder().decode((await reader.read()).value);
+    assert.match(terminal, /event: error/);
+    assert.match(terminal, /UNAUTHORIZED/);
+    assert.equal((await reader.read()).done, true);
   } finally {
     await http.close();
   }
+});
+
+test("terminal upstream resource errors release managed demand without explicit close", async () => {
+  const terminal = Object.assign(new Error("denied"), { code: "UNAUTHORIZED", retryable: false });
+  const morbin = createMorbin({ providers: { denied: { fetch: async () => { throw terminal; } } } });
+  const root = process.env.MORBR_TEST_TMPDIR ?? tmpdir();
+  const path = join(await mkdtemp(join(root, "morbr-terminal-demand-")), "state.json");
+  const service = await createMorbr({ statePath: path, morbin, demandPollIntervalMs: 5 });
+  await service.createUser({ username: "admin", password: "fixture-password", role: "admin" });
+  const admin = service.authenticate({ username: "admin", password: "fixture-password" });
+  await service.registerDeployment(generic);
+  const key = await service.issueKey(admin, { scopes: ["reporting"], ...generic });
+  const instance = await service.startInstance(generic);
+  service.subscribeMorbinResource({ reportingToken: key.token, identity: generic, instanceId: instance.id, provider: "denied", resource: "resource-1" });
+  await waitFor(() => service.morbinSubscriptions.size === 0);
+  assert.equal(service.demandPollTimer, null);
 });
 
 test("HTTP/SSE/webhook transport authorizes requests and records signed fixture webhooks", async () => {

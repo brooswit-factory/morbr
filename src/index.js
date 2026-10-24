@@ -137,12 +137,21 @@ export class MorbrService {
     this.configDelivery = Promise.resolve();
     this.activitySubscriptions = new Set();
     this.upstreamFreshness = freshnessBounds(upstreamFreshness);
+    this.morbinFreshness = null;
     if (morbinFreshness?.upstream) {
-      const [minimumMs, maximumMs] = morbinFreshness.upstream;
-      const actual = freshnessBounds({ minimumMs, maximumMs });
+      const sourceBounds = Object.fromEntries(["pull", "upstream", "push"].map((source) => {
+        const [minimumMs, maximumMs] = morbinFreshness[source] ?? morbinFreshness.upstream;
+        return [source, freshnessBounds({ minimumMs, maximumMs })];
+      }));
+      const actual = sourceBounds.upstream;
       if (actual.minimumMs !== this.upstreamFreshness.minimumMs || actual.maximumMs !== this.upstreamFreshness.maximumMs) {
         fail("FRESHNESS_BOUNDS_MISMATCH");
       }
+      this.morbinFreshness = sourceBounds;
+      this.upstreamFreshness = Object.freeze({
+        minimumMs: Math.min(...Object.values(sourceBounds).map((range) => range.minimumMs)),
+        maximumMs: Math.max(...Object.values(sourceBounds).map((range) => range.maximumMs)),
+      });
     }
     this.demandPollIntervalMs = demandPollIntervalMs ?? this.upstreamFreshness.maximumMs + 1;
     if (!Number.isFinite(this.demandPollIntervalMs) || this.demandPollIntervalMs <= 0) fail("INVALID_DEMAND_POLL_INTERVAL");
@@ -401,7 +410,11 @@ export class MorbrService {
    * never an opaque subscription subject.
    */
   upstreamFreshnessBounds() {
-    return { ...this.upstreamFreshness, demandPollIntervalMs: this.demandPollIntervalMs };
+    return {
+      ...this.upstreamFreshness,
+      demandPollIntervalMs: this.demandPollIntervalMs,
+      ...(this.morbinFreshness ? { sources: structuredClone(this.morbinFreshness) } : {}),
+    };
   }
 
   startDemandPolling() {

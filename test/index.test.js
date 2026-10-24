@@ -205,6 +205,28 @@ test("connected poll minimum must exceed Morbr's published upstream maximum", as
     }),
     (error) => error instanceof MorbrError && error.code === "FRESHNESS_BOUNDS_MISMATCH",
   );
+  let now = 1_000;
+  let fetches = 0;
+  const sourceFreshness = { pull: [100, 100], upstream: [4, 6], push: [4, 6] };
+  const sharedMorbin = createMorbin({
+    providers: { fake: { fetch: async () => ({ id: "resource-1", revision: ++fetches }) } },
+    freshness: sourceFreshness,
+    now: () => now,
+    random: () => 0,
+  });
+  await assert.rejects(
+    createMorbr({ statePath: path, morbin: sharedMorbin, upstreamFreshness: { minimumMs: 4, maximumMs: 6 }, morbinFreshness: sourceFreshness, connectedPollMinimumMs: 7 }),
+    (error) => error instanceof RangeError,
+  );
+  const bounded = await createMorbr({ statePath: path, morbin: sharedMorbin, upstreamFreshness: { minimumMs: 4, maximumMs: 6 }, morbinFreshness: sourceFreshness, connectedPollMinimumMs: 101 });
+  assert.equal(bounded.upstreamFreshnessBounds().maximumMs, 100);
+  assert.deepEqual(bounded.upstreamFreshnessBounds().sources.pull, { minimumMs: 100, maximumMs: 100 });
+  const watched = sharedMorbin.watchResource("fake", "resource-1", () => {});
+  await waitFor(() => fetches === 1);
+  now += 7;
+  await sharedMorbin.poll();
+  assert.equal(fetches, 1, "the effective maximum covers the still-fresh pull cache TTL");
+  watched.close();
 });
 
 test("Morbin events are consumed through the pinned library and persisted without key propagation", async () => {

@@ -21,7 +21,12 @@ activity. It is not an autonomous task launcher and it does not execute events.
   included.
 
 Morbin config/event-stream integration is deliberately outside this initial
-service slice and remains dependent on FACTORY-1029.
+service implementation: Morbr consumes the approved pinned Morbin library
+(`39e47eb8089e6ef17426e8607beec21759b30c40`) through its public API. Morbr
+adapts resource-stream envelopes into persisted activity and can ingest upstream
+events through Morbin; it does not copy polling or replay mechanics and never
+passes a Morbr credential to a provider. Config consumers receive an immediate
+snapshot and de-duplicated changes until their scoped key is revoked.
 
 ## Build and verify
 

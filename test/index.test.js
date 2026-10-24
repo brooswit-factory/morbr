@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createMorbin } from "@brooswit-factory/morbin";
 import { createMorbr, MorbrError } from "../src/index.js";
 
 const generic = { deploymentId: "deploy-generic", type: "generic" };
@@ -19,6 +20,16 @@ async function fixture() {
   await service.registerDeployment(generic);
   await service.registerDeployment(butchr);
   return { path, service, admin, reader: service.authenticate({ username: "reader", password: "fixture-password" }) };
+}
+
+const nextTurn = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+async function waitFor(check) {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if (check()) return;
+    await nextTurn();
+  }
+  assert.fail("timed out waiting for asynchronous stream delivery");
 }
 
 function forbidden(error) {
@@ -92,4 +103,38 @@ test("serialized saves retain the latest config and key revocation after overlap
   const reloaded = await createMorbr({ statePath: path });
   assert.deepEqual(reloaded.state.config, { version: 2, value: { version: 2 } });
   assert.throws(() => reloaded.getConfig(key.token, generic), (error) => error instanceof MorbrError && error.code === "UNAUTHORIZED");
+});
+
+test("configuration subscribers receive isolated snapshots and stop after revocation", async () => {
+  const { service, admin } = await fixture();
+  const key = await service.issueKey(admin, { scopes: ["config"], ...generic });
+  const received = [];
+  service.subscribeConfig(key.token, generic, (config) => received.push(config));
+  await service.setConfig(admin, { revision: 1 });
+  received[1].value.revision = "tampered";
+  assert.deepEqual(service.getConfig(key.token, generic), { version: 1, value: { revision: 1 } });
+  await service.revokeKey(admin, key.id);
+  await service.setConfig(admin, { revision: 2 });
+  assert.equal(received.length, 2);
+});
+
+test("Morbin events are consumed through the pinned library and persisted without key propagation", async () => {
+  const morbin = createMorbin({ providers: { fake: { fetch: async () => ({ id: "resource-1", revision: 1 }) } } });
+  const root = process.env.MORBR_TEST_TMPDIR ?? tmpdir();
+  const path = join(await mkdtemp(join(root, "morbr-morbin-")), "state.json");
+  const service = await createMorbr({ statePath: path, morbin });
+  await service.createUser({ username: "admin", password: "fixture-password", role: "admin" });
+  const admin = service.authenticate({ username: "admin", password: "fixture-password" });
+  await service.registerDeployment(generic);
+  const key = await service.issueKey(admin, { scopes: ["reporting"], ...generic });
+  const instance = await service.startInstance(generic);
+  const observed = [];
+  const stream = service.subscribeMorbinEvents(admin, { reportingToken: key.token, identity: generic, instanceId: instance.id, provider: "fake", resource: "resource-1", listener: (event) => observed.push(event) });
+  await waitFor(() => observed.length === 1);
+  assert.equal(observed[0].kind, "snapshot");
+  assert.equal(service.listActivity(admin, generic.deploymentId)[0].type, "morbin.snapshot");
+  await service.ingestMorbinEvent(key.token, generic, { provider: "fake", resource: "resource-1", value: { id: "resource-1", revision: 2 }, cursor: "c2" });
+  await waitFor(() => observed.length === 2);
+  assert.equal(observed[1].data.revision, 2);
+  stream.close();
 });

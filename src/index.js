@@ -99,15 +99,17 @@ export class JsonStateStore {
  * launch jobs or execute client-provided events.
  */
 export class MorbrService {
-  static async open({ statePath }) {
+  static async open({ statePath, morbin = null }) {
     const store = new JsonStateStore(statePath);
-    return new MorbrService(store, await store.load());
+    return new MorbrService(store, await store.load(), morbin);
   }
 
-  constructor(store, state) {
+  constructor(store, state, morbin = null) {
     this.store = store;
     this.state = state;
     this.sessions = new Map();
+    this.morbin = morbin;
+    this.configSubscriptions = new Set();
   }
 
   async persist() {
@@ -189,6 +191,7 @@ export class MorbrService {
     if (JSON.stringify(this.state.config.value) !== snapshot.encoded) {
       this.state.config = { version: this.state.config.version + 1, value: snapshot.value };
       await this.persist();
+      this.publishConfig();
     }
     return structuredClone(this.state.config);
   }
@@ -196,6 +199,27 @@ export class MorbrService {
   getConfig(token, identity) {
     this.keyFor(token, "config", identity);
     return structuredClone(this.state.config);
+  }
+
+  subscribeConfig(token, identity, listener) {
+    if (typeof listener !== "function") fail("INVALID_LISTENER");
+    this.keyFor(token, "config", identity);
+    const subscription = { token, identity: structuredClone(identity), listener };
+    this.configSubscriptions.add(subscription);
+    listener(structuredClone(this.state.config));
+    return { close: () => this.configSubscriptions.delete(subscription) };
+  }
+
+  publishConfig() {
+    for (const subscription of this.configSubscriptions) {
+      try {
+        this.keyFor(subscription.token, "config", subscription.identity);
+        subscription.listener(structuredClone(this.state.config));
+      } catch (error) {
+        // Revocation/authorization terminates delivery without emitting state.
+        this.configSubscriptions.delete(subscription);
+      }
+    }
   }
 
   async registerDeployment({ deploymentId, type, name = "" }) {
@@ -229,6 +253,42 @@ export class MorbrService {
     this.state.activity.push(event);
     await this.persist();
     return structuredClone(event);
+  }
+
+  /**
+   * Connect an approved Morbin resource stream to persisted Morbr activity.
+   * Morbin owns polling/replay mechanics; this adapter neither copies them nor
+   * passes a Morbr key into providers.
+   */
+  subscribeMorbinEvents(actor, { reportingToken, identity, instanceId, provider, resource, listener = () => {} }) {
+    this.requireAdmin(actor);
+    if (!this.morbin?.watchResource) fail("MORBIN_NOT_CONFIGURED");
+    const deployment = this.deploymentFor(identity);
+    const instance = this.state.instances[instanceId];
+    if (!instance || instance.deploymentId !== deployment.deploymentId) fail("UNKNOWN_IDENTITY");
+    this.keyFor(reportingToken, "reporting", deployment);
+    let close = () => {};
+    const subscription = this.morbin.watchResource(provider, resource, async (event) => {
+      try {
+        await this.recordActivity(reportingToken, {
+          deploymentId: deployment.deploymentId,
+          instanceId,
+          type: `morbin.${event.kind}`,
+          payload: event,
+        });
+        listener(structuredClone(event));
+      } catch (error) {
+        if (error instanceof MorbrError && ["UNAUTHORIZED", "FORBIDDEN"].includes(error.code)) close();
+      }
+    });
+    close = () => subscription.close();
+    return { id: subscription.id, close };
+  }
+
+  async ingestMorbinEvent(token, identity, event) {
+    this.keyFor(token, "reporting", this.deploymentFor(identity));
+    if (!this.morbin?.receive) fail("MORBIN_NOT_CONFIGURED");
+    return this.morbin.receive(isolatedJson(event).value);
   }
 
   listActivity(actor, deploymentId) {

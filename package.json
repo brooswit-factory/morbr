@@ -10,5 +10,8 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "dependencies": {
+    "@brooswit-factory/morbin": "github:brooswit-factory/morbin#39e47eb8089e6ef17426e8607beec21759b30c40"
   }
 }

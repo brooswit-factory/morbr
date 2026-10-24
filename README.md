@@ -34,10 +34,19 @@ data (`code`, `message`, `retryable: false`) for live consumers and reloads.
 
 The exported service implements persisted local state, config subscriptions,
 Morbin resource-stream consumption, and `ingestMorbinEvent` for authorized
-upstream/client event chaining. A remote HTTP transport (including request
-routing and webhook signature/receiver policy) has not been implemented in
-this package yet; it remains explicit FACTORY-1030 work, along with the full
-cross-repository verification owned by FACTORY-1033.
+upstream/client event chaining. `createMorbrHttpServer` supplies a runnable
+HTTP boundary: Basic-authenticated `/management` and `/config`, bearer-key
+SSE `/events/config`, Basic-authenticated `/events/activity`, and signed
+`/webhooks/:name` ingestion. `start({host, port})` and `close()` make startup
+and shutdown explicit for local or remote hosting.
+
+Webhook bindings are startup-only injected fixtures containing a secret,
+scoped reporting token, identity, and optional instance ID. Fixture signatures
+are `sha256=<HMAC-SHA256(JSON.stringify(parsedBody))>` in
+`x-morbr-signature`; this is deliberately documented test policy, not a
+production canonicalization/replay-protection design. Production transport
+configuration still needs an explicit raw-body signing and replay policy.
+FACTORY-1033 owns full cross-repository verification.
 
 ## Management UI boundary
 

@@ -429,3 +429,5 @@ export function createManagementClient(service, actor) {
     subscribeActivity: (listener) => service.subscribeManagementActivity(actor, listener),
   });
 }
+
+export { createMorbrHttpServer } from "./server.js";

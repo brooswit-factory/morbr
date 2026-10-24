@@ -3,8 +3,9 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHmac } from "node:crypto";
 import { createMorbin } from "@brooswit-factory/morbin";
-import { createManagementClient, createMorbr, MorbrError } from "../src/index.js";
+import { createManagementClient, createMorbr, createMorbrHttpServer, MorbrError } from "../src/index.js";
 
 const generic = { deploymentId: "deploy-generic", type: "generic" };
 const butchr = { deploymentId: "deploy-butchr", type: "butchr" };
@@ -228,4 +229,56 @@ test("management client exposes sanitized DTOs and keeps mutations server-author
   await adminClient.updateUser("reader", { role: "admin" });
   assert.equal(adminClient.getSnapshot().users.find((user) => user.username === "reader").role, "admin");
   activity.close();
+});
+
+test("HTTP/SSE/webhook transport authorizes requests and records signed fixture webhooks", async () => {
+  const root = process.env.MORBR_TEST_TMPDIR ?? tmpdir();
+  await mkdir(root, { recursive: true });
+  const path = join(await mkdtemp(join(root, "morbr-http-")), "state.json");
+  const morbin = createMorbin({ providers: { fake: { fetch: async () => ({ id: "resource-1" }) } } });
+  const service = await createMorbr({ statePath: path, morbin });
+  await service.createUser({ username: "admin", password: "fixture-password", role: "admin" });
+  const admin = service.authenticate({ username: "admin", password: "fixture-password" });
+  await service.createUser(admin, { username: "reader", password: "fixture-password", role: "reader" });
+  await service.registerDeployment(generic);
+  const key = await service.issueKey(admin, { scopes: ["config", "reporting"], ...generic });
+  const instance = await service.startInstance(generic);
+  const http = createMorbrHttpServer({ service, webhookBindings: { fixture: { secret: "fixture-secret", reportingToken: key.token, identity: generic, instanceId: instance.id } } });
+  const address = await http.start();
+  const base = `http://127.0.0.1:${address.port}`;
+  const basic = (username) => `Basic ${Buffer.from(`${username}:fixture-password`).toString("base64")}`;
+  try {
+    const management = await fetch(`${base}/management`, { headers: { authorization: basic("reader") } });
+    assert.equal(management.status, 200);
+    assert.equal(JSON.stringify(await management.json()).includes("passwordDigest"), false);
+    const forbiddenResponse = await fetch(`${base}/config`, { method: "PATCH", headers: { authorization: basic("reader"), "content-type": "application/json" }, body: JSON.stringify({ mode: "reader" }) });
+    assert.equal(forbiddenResponse.status, 403);
+    const wrongScope = await fetch(`${base}/events/config?deploymentId=${butchr.deploymentId}&type=${butchr.type}`, { headers: { authorization: `Bearer ${key.token}` } });
+    assert.equal(wrongScope.status, 403);
+
+    const stream = await fetch(`${base}/events/config?deploymentId=${generic.deploymentId}&type=${generic.type}`, { headers: { authorization: `Bearer ${key.token}` } });
+    assert.equal(stream.status, 200);
+    const streamReader = stream.body.getReader();
+    const first = new TextDecoder().decode((await streamReader.read()).value);
+    assert.match(first, /event: config/);
+    const updated = await fetch(`${base}/config`, { method: "PATCH", headers: { authorization: basic("admin"), "content-type": "application/json" }, body: JSON.stringify({ mode: "admin" }) });
+    assert.equal(updated.status, 200);
+    const second = new TextDecoder().decode((await streamReader.read()).value);
+    assert.match(second, /"mode":"admin"/);
+    await streamReader.cancel();
+
+    const webhook = { provider: "fake", resource: "resource-1", value: { id: "resource-1", revision: 2 }, cursor: "c2" };
+    const body = JSON.stringify(webhook);
+    const signature = `sha256=${createHmac("sha256", "fixture-secret").update(body).digest("hex")}`;
+    const rejected = await fetch(`${base}/webhooks/fixture`, { method: "POST", headers: { "content-type": "application/json", "x-morbr-signature": "sha256=bad" }, body });
+    assert.equal(rejected.status, 401);
+    const accepted = await fetch(`${base}/webhooks/fixture`, { method: "POST", headers: { "content-type": "application/json", "x-morbr-signature": signature }, body });
+    assert.equal(accepted.status, 202);
+    assert.equal(service.listActivity(admin, generic.deploymentId).at(-1).type, "webhook");
+    await service.revokeKey(admin, key.id);
+    const revoked = await fetch(`${base}/events/config?deploymentId=${generic.deploymentId}&type=${generic.type}`, { headers: { authorization: `Bearer ${key.token}` } });
+    assert.equal(revoked.status, 401);
+  } finally {
+    await http.close();
+  }
 });

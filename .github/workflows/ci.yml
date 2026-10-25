@@ -15,5 +15,15 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      # The cross-repository fixture imports its accepted ButchrD input as a
+      # sibling checkout.  Do not substitute Morbr's older package dependency:
+      # ButchrD's lockfile installs the pinned Morbin input below.
+      - name: Check out accepted ButchrD fixture input
+        run: |
+          git clone --no-checkout https://github.com/brooswit-factory/butchrd.git ../butchrd-final
+          git -C ../butchrd-final checkout 63597da8ed59567a4ee4aea3e872842b4d7b126b
+          test "$(git -C ../butchrd-final rev-parse HEAD)" = "63597da8ed59567a4ee4aea3e872842b4d7b126b"
+      - name: Install accepted ButchrD and Morbin fixture inputs
+        run: npm ci --prefix ../butchrd-final
       - run: npm run build
       - run: npm test

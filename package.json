@@ -5,14 +5,20 @@
   "type": "module",
   "exports": "./src/index.js",
   "scripts": {
-    "build": "node --check src/index.js && node --check src/server.js",
-    "test": "MORBR_TEST_TMPDIR=.tmp node --test"
+    "build": "node --check src/index.js && node --check src/server.js && node --check src/management-ui.js && node --check src/management-http.js && node --check src/web-server.mjs && node --check src/electron-main.js",
+    "test": "cross-env MORBR_TEST_TMPDIR=.tmp node --test",
+    "start:web": "node src/web-server.mjs",
+    "start:electron": "electron src/electron-main.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.12.0"
   },
   "dependencies": {
     "@brooswit-factory/butchrd": "github:brooswit-factory/butchrd#938e1411d053309c6beb11a9f84d8af4063b6d0e",
     "@brooswit-factory/morbin": "github:brooswit-factory/morbin#39e47eb8089e6ef17426e8607beec21759b30c40"
+  },
+  "devDependencies": {
+    "cross-env": "^7.0.3",
+    "electron": "^43.8.3"
   }
 }

@@ -82,9 +82,22 @@ The facade exposes `setConfig`, `createUser`, `updateUser`,
 read a snapshot but cannot use an admin mutation. Activity subscription events
 contain metadata only, never the stored payload.
 
+## Management interfaces
+
+`src/management-ui.js` supplies the same central-management interface to the
+web renderer and Electron renderer. It has Authorizations, Deployments,
+Instances and Users sections. The disposable fixture client demonstrates the
+sanitized DTO boundary expected from the service: it exposes no key/password
+digests or raw service state. Deployments and instances are read-only; only an
+admin can edit authorizations or users. Client and agent counters render as
+“not measured” unless an upstream measurement is supplied, so an observed zero
+is not confused with missing telemetry. `src/electron-main.js` is the Electron
+43 entry point; see `WEB.md` for fixture versus disposable service-backed
+`/api/` setup.
+
 ## Build and verify
 
-Requires Node.js 20 or newer.
+Requires Node.js 22.12 or newer (Node 24 is used by CI and qualified GUI QA).
 
 ```sh
 npm ci

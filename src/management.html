@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Morbr Management</title></head>
+<body><div id="app"></div><script src="./management-config.js"></script><script type="module">
+  import { createFixtureManagementClient, createManagementApp } from "./management-ui.js";
+  import { createHttpManagementClient } from "./management-http.js";
+  // The same-origin bridge config contains no credentials; the bridge keeps
+  // disposable local credentials server-side. Fixture mode remains the default.
+  const client = globalThis.morbrManagement
+    ? createHttpManagementClient(globalThis.morbrManagement)
+    : createFixtureManagementClient();
+  const management = createManagementApp({ document, client });
+  document.querySelector("#app").append(management.root);
+  management.render();
+</script></body></html>
